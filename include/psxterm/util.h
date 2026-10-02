@@ -17,6 +17,12 @@ bool psx_parse_u32(const char *s, uint32_t *out);
 bool psx_parse_int(const char *s, int *out);
 
 /*
+ * Join two path components with a single '/' separator. Returns 0 on
+ * success, -1 if the result would not fit (errno = ENAMETOOLONG).
+ */
+int psx_path_join(char *out, size_t out_cap, const char *a, const char *b);
+
+/*
  * Growable byte buffer used for both framed output queues and parsing
  * scratch space. The buffer keeps a read offset so partially flushed data
  * does not need to be memmoved on every write.

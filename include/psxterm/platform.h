@@ -24,10 +24,29 @@ const char *psx_platform_uname(void);
 /* Default PATH for new sessions. */
 const char *psx_platform_default_path(void);
 
+/* Home directory for new sessions. */
+const char *psx_platform_home_dir(void);
+
+/* Default user name reported by `whoami`. */
+const char *psx_platform_user_name(void);
+
 /* Directory where PSXTerm keeps its executables, e.g. /data/psxterm/bin. */
 const char *psx_platform_bin_dir(void);
 
 /* Cryptographically weak is fine here: session ids and handshake tokens. */
 int psx_platform_random_bytes(void *buf, size_t len);
+
+/* Environment inherited by new sessions (NULL-terminated), or NULL. */
+char *const *psx_platform_inherit_environ(void);
+
+/*
+ * Filesystem preparation, called once during psx_platform_init(). On
+ * PS4/PS5 this is where a payload would make /data reachable; the host
+ * implementation is a no-op.
+ */
+bool psx_fs_prepare(void);
+
+/* Default working directory for new sessions. */
+const char *psx_fs_default_cwd(void);
 
 bool psx_platform_is_target(void);

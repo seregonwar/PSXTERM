@@ -10,7 +10,7 @@
 bool
 psx_platform_init(void)
 {
-    return true;
+    return psx_fs_prepare();
 }
 
 const char *
@@ -48,6 +48,22 @@ psx_platform_default_path(void)
 }
 
 const char *
+psx_platform_home_dir(void)
+{
+    const char *home = getenv("HOME");
+
+    return home && *home ? home : "/tmp";
+}
+
+const char *
+psx_platform_user_name(void)
+{
+    const char *user = getenv("USER");
+
+    return user && *user ? user : "user";
+}
+
+const char *
 psx_platform_bin_dir(void)
 {
     return "bin";
@@ -70,6 +86,14 @@ psx_platform_random_bytes(void *buf, size_t len)
     fclose(fp);
 
     return 0;
+}
+
+char *const *
+psx_platform_inherit_environ(void)
+{
+    extern char **environ;
+
+    return environ;
 }
 
 bool

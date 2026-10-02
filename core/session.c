@@ -1,0 +1,897 @@
+#include <errno.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include "psxterm/log.h"
+#include "psxterm/platform.h"
+#include "psxterm/protocol.h"
+#include "psxterm/session.h"
+#include "psxterm/shell.h"
+#include "psxterm/tty.h"
+
+/* Bound on queued client output: a session that stops reading must not make
+ * the daemon grow without bound. */
+#define PSX_SESSION_OUT_MAX (8u * 1024u * 1024u)
+
+#define PSX_EMIT_CHUNK PTTY_MAX_PAYLOAD
+
+psx_session_t *
+psx_session_create(uint32_t id, int sock_fd)
+{
+    psx_session_t *session = calloc(1, sizeof(*session));
+
+    if(!session) {
+        return NULL;
+    }
+
+    session->id = id;
+    session->sock_fd = sock_fd;
+    session->state = PSX_SESSION_ACCEPTED;
+    session->rows = 24;
+    session->cols = 80;
+    session->created_ms = session->last_activity_ms = psx_now_ms();
+
+    psx_tty_init(&session->tty);
+    psx_buf_init(&session->out);
+    psx_buf_init(&session->in);
+    ptty_reader_init(&session->reader, sock_fd);
+
+    return session;
+}
+
+void
+psx_session_destroy(psx_session_t *session)
+{
+    if(!session) {
+        return;
+    }
+
+    if(session->proc.running && session->proc.pid > 0) {
+        int status;
+
+        psx_process_kill(session->proc.pid, SIGTERM);
+        for(int i = 0; i < 20; i++) {
+            if(psx_process_wait(session->proc.pid, &status, 50) == 0) {
+                break;
+            }
+        }
+        if(psx_process_wait(session->proc.pid, &status, 0) == 1) {
+            psx_process_kill(session->proc.pid, SIGKILL);
+            psx_process_wait(session->proc.pid, &status, 200);
+        }
+        session->proc.running = false;
+    }
+
+    psh_shell_destroy(session->shell);
+    psx_tty_close(&session->tty);
+    ptty_reader_destroy(&session->reader);
+    psx_buf_free(&session->out);
+    psx_buf_free(&session->in);
+    psx_env_clear(&session->env);
+
+    if(session->sock_fd >= 0) {
+        close(session->sock_fd);
+    }
+
+    session->state = PSX_SESSION_CLOSED;
+    free(session);
+}
+
+int
+psx_session_emit(psx_session_t *session, uint8_t type, const void *data, size_t len)
+{
+    size_t offset = 0;
+
+    if(psx_buf_pending(&session->out) > PSX_SESSION_OUT_MAX) {
+        errno = ENOBUFS;
+        return -1;
+    }
+
+    do {
+        size_t chunk = len - offset;
+        ptty_header_t header = {
+            .magic = PTTY_MAGIC,
+            .version = PTTY_VERSION,
+            .type = type,
+            .flags = 0,
+            .session_id = session->id,
+            .payload_length = (uint32_t)chunk,
+        };
+
+        if(chunk > PSX_EMIT_CHUNK) {
+            chunk = PSX_EMIT_CHUNK;
+            header.payload_length = (uint32_t)chunk;
+        }
+
+        if(ptty_queue_frame(&session->out, &header,
+                            chunk ? (const uint8_t *)data + offset : NULL) < 0) {
+            return -1;
+        }
+
+        offset += chunk;
+    } while(offset < len);
+
+    return 0;
+}
+
+int
+psx_session_emit_fmt(psx_session_t *session, uint8_t type, const char *fmt, ...)
+{
+    char message[1024];
+    va_list ap;
+    int len;
+
+    va_start(ap, fmt);
+    len = vsnprintf(message, sizeof(message), fmt, ap);
+    va_end(ap);
+
+    if(len < 0) {
+        return -1;
+    }
+    if((size_t)len >= sizeof(message)) {
+        len = (int)sizeof(message) - 1;
+    }
+
+    return psx_session_emit(session, type, message, (size_t)len);
+}
+
+int
+psx_session_flush(psx_session_t *session)
+{
+    if(psx_buf_pending(&session->out) == 0) {
+        return 0;
+    }
+
+    if(psx_buf_flush(&session->out, session->sock_fd) < 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+void
+psx_session_touch(psx_session_t *session)
+{
+    session->last_activity_ms = psx_now_ms();
+}
+
+bool
+psx_session_has_process(const psx_session_t *session)
+{
+    return session->proc.running;
+}
+
+const char *
+psx_session_state_name(psx_session_state_t state)
+{
+    switch(state) {
+    case PSX_SESSION_ACCEPTED: return "accepted";
+    case PSX_SESSION_HANDSHAKING: return "handshake";
+    case PSX_SESSION_RUNNING: return "running";
+    case PSX_SESSION_CLOSING: return "closing";
+    case PSX_SESSION_CLOSED: return "closed";
+    default: return "unknown";
+    }
+}
+
+/* --- path handling ------------------------------------------------------ */
+
+static int
+normalize_path(const char *in, char *out, size_t out_cap)
+{
+    char work[PSX_PATH_MAX];
+    const char *segments[PSX_PATH_MAX / 2];
+    size_t count = 0;
+    size_t used = 0;
+    char *saveptr = NULL;
+
+    if(strlen(in) >= sizeof(work)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    strcpy(work, in);
+
+    for(char *token = strtok_r(work, "/", &saveptr); token;
+        token = strtok_r(NULL, "/", &saveptr)) {
+        if(strcmp(token, ".") == 0) {
+            continue;
+        }
+        if(strcmp(token, "..") == 0) {
+            if(count > 0) {
+                count--;
+            }
+            continue;
+        }
+        segments[count++] = token;
+    }
+
+    if(out_cap < 2) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    out[used++] = '/';
+    for(size_t i = 0; i < count; i++) {
+        size_t seg_len = strlen(segments[i]);
+
+        if(used + seg_len + 2 > out_cap) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+
+        if(i > 0) {
+            out[used++] = '/';
+        }
+        memcpy(out + used, segments[i], seg_len);
+        used += seg_len;
+    }
+    out[used] = '\0';
+
+    return 0;
+}
+
+int
+psx_session_absolute_path(const psx_session_t *session, const char *path,
+                          char *out, size_t out_cap)
+{
+    char combined[PSX_PATH_MAX];
+
+    if(!path || !*path) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if(path[0] == '/') {
+        if(strlen(path) >= sizeof(combined)) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        strcpy(combined, path);
+    } else if(path[0] == '~' && (path[1] == '\0' || path[1] == '/')) {
+        const char *home = psx_env_get(&session->env, "HOME");
+
+        if(!home || !*home) {
+            errno = ENOENT;
+            return -1;
+        }
+        if(psx_path_join(combined, sizeof(combined), home, path + 1) < 0) {
+            return -1;
+        }
+    } else {
+        if(psx_path_join(combined, sizeof(combined), session->cwd, path) < 0) {
+            return -1;
+        }
+    }
+
+    return normalize_path(combined, out, out_cap);
+}
+
+static bool
+is_executable_file(const char *path)
+{
+    struct stat st;
+
+    if(stat(path, &st) != 0) {
+        return false;
+    }
+
+    return S_ISREG(st.st_mode);
+}
+
+char *
+psx_session_resolve_path(psx_session_t *session, const char *name)
+{
+    const char *path_env;
+    char candidate[PSX_PATH_MAX];
+    char *saveptr = NULL;
+    char *dirs;
+
+    if(strchr(name, '/')) {
+        char resolved[PSX_PATH_MAX];
+
+        if(psx_session_absolute_path(session, name, resolved, sizeof(resolved)) < 0) {
+            return NULL;
+        }
+
+        return is_executable_file(resolved) ? strdup(resolved) : NULL;
+    }
+
+    path_env = psx_env_get(&session->env, "PATH");
+    if(!path_env || !*path_env) {
+        path_env = psx_platform_default_path();
+    }
+
+    if(!(dirs = strdup(path_env))) {
+        return NULL;
+    }
+
+    for(char *dir = strtok_r(dirs, ":", &saveptr); dir;
+        dir = strtok_r(NULL, ":", &saveptr)) {
+        char with_ext[PSX_PATH_MAX];
+        size_t name_len = strlen(name);
+
+        if(!*dir) {
+            continue;
+        }
+
+        if(psx_path_join(candidate, sizeof(candidate), dir, name) == 0 &&
+           is_executable_file(candidate)) {
+            free(dirs);
+            return strdup(candidate);
+        }
+
+        if(name_len + sizeof(".elf") > sizeof(with_ext)) {
+            continue;
+        }
+        memcpy(with_ext, name, name_len);
+        memcpy(with_ext + name_len, ".elf", sizeof(".elf"));
+
+        if(psx_path_join(candidate, sizeof(candidate), dir, with_ext) == 0 &&
+           is_executable_file(candidate)) {
+            free(dirs);
+            return strdup(candidate);
+        }
+    }
+
+    free(dirs);
+
+    return NULL;
+}
+
+/* --- session start ------------------------------------------------------ */
+
+int
+psx_session_begin(psx_session_t *session)
+{
+    psx_tty_backend_t backend = psx_tty_default_backend();
+
+    psx_env_init(&session->env, psx_platform_inherit_environ());
+
+    if(session->term[0]) {
+        psx_env_set(&session->env, "TERM", session->term);
+    }
+
+    if(!getcwd(session->cwd, sizeof(session->cwd))) {
+        snprintf(session->cwd, sizeof(session->cwd), "%s", psx_fs_default_cwd());
+    }
+    psx_env_set(&session->env, "PWD", session->cwd);
+
+    if(psx_tty_open(&session->tty, backend, session->rows, session->cols) < 0) {
+        PSX_LOGW("session %u: tty backend %s unavailable (%s)", session->id,
+                 psx_tty_backend_name(backend), strerror(errno));
+
+        if(backend != PSX_TTY_BACKEND_PIPE &&
+           psx_tty_open(&session->tty, PSX_TTY_BACKEND_PIPE, session->rows,
+                        session->cols) < 0) {
+            PSX_LOGE("session %u: no tty backend available (%s)", session->id,
+                     strerror(errno));
+        }
+    }
+
+    if(!(session->shell = psh_shell_create(session))) {
+        return -1;
+    }
+
+    session->state = PSX_SESSION_RUNNING;
+    psh_shell_prompt(session->shell);
+
+    return 0;
+}
+
+/* --- process handling --------------------------------------------------- */
+
+int
+psx_session_spawn_process(psx_session_t *session, const char *path,
+                          char *const *argv)
+{
+    psx_spawn_options_t options;
+    char *envp[PSX_ENV_MAX + 1];
+    pid_t pid;
+
+    if(session->proc.running) {
+        errno = EBUSY;
+        return -1;
+    }
+
+    if(session->tty.backend == PSX_TTY_BACKEND_NONE) {
+        errno = ENODEV;
+        return -1;
+    }
+
+    for(size_t i = 0; i < session->env.count; i++) {
+        envp[i] = session->env.entries[i];
+    }
+    envp[session->env.count] = NULL;
+
+    memset(&options, 0, sizeof(options));
+    options.path = path;
+    options.argv = argv;
+    options.envp = envp;
+    options.stdin_fd = session->tty.slave_fd;
+    options.stdout_fd = session->tty.slave_fd;
+    options.stderr_fd = session->tty.slave_fd;
+    options.cwd = session->cwd;
+
+    if((pid = psx_spawn(&options)) < 0) {
+        return -1;
+    }
+
+    session->proc.pid = pid;
+    session->proc.running = true;
+    session->proc.status = 0;
+    session->proc.started_ms = psx_now_ms();
+
+    /* Apply the current window size to the new terminal. */
+    psx_tty_set_size(&session->tty, session->rows, session->cols);
+
+    PSX_LOGD("session %u: spawned pid %d (%s)", session->id, (int)pid, path);
+
+    return 0;
+}
+
+void
+psx_session_emit_exit(psx_session_t *session, int exit_code, uint8_t kind)
+{
+    uint8_t payload[5];
+    uint32_t value = (uint32_t)exit_code;
+
+    payload[0] = (uint8_t)(value & 0xff);
+    payload[1] = (uint8_t)((value >> 8) & 0xff);
+    payload[2] = (uint8_t)((value >> 16) & 0xff);
+    payload[3] = (uint8_t)((value >> 24) & 0xff);
+    payload[4] = kind;
+
+    psx_session_emit(session, PTTY_MSG_EXIT, payload, sizeof(payload));
+}
+
+bool
+psx_session_check_process(psx_session_t *session)
+{
+    int status = 0;
+    int rc;
+    int exit_code = -1;
+
+    if(!session->proc.running) {
+        return false;
+    }
+
+    rc = psx_process_wait(session->proc.pid, &status, 0);
+
+    if(rc == 1) {
+        return false;
+    }
+
+    if(rc < 0) {
+        PSX_LOGW("session %u: waitpid(%d) failed: %s", session->id,
+                 (int)session->proc.pid, strerror(errno));
+        status = -1;
+    }
+
+    session->proc.running = false;
+    session->proc.status = status;
+
+    /* Drain anything the process left in the tty. */
+    psx_session_on_tty_readable(session);
+
+    if(rc == 0 && WIFEXITED(status)) {
+        exit_code = WEXITSTATUS(status);
+    } else if(rc == 0 && WIFSIGNALED(status)) {
+        exit_code = 128 + WTERMSIG(status);
+    }
+
+    psx_session_emit_exit(session, exit_code, PTTY_EXIT_PROCESS);
+
+    if(session->exec_pending) {
+        session->exec_pending = false;
+        psx_session_emit_exit(session, exit_code, PTTY_EXIT_SHELL);
+    }
+
+    if(session->shell && session->state == PSX_SESSION_RUNNING) {
+        psh_shell_prompt(session->shell);
+    }
+
+    PSX_LOGD("session %u: pid %d exited (status %d)", session->id,
+             (int)session->proc.pid, status);
+
+    return true;
+}
+
+/* --- socket IO ---------------------------------------------------------- */
+
+static int
+session_forward_to_process(psx_session_t *session, const uint8_t *payload,
+                           size_t len)
+{
+    size_t offset = 0;
+
+    /* Zero-length STDIN is an EOF marker for the foreground process. */
+    if(len == 0) {
+        if(session->tty.is_real_pty) {
+            /* Ctrl+D on a canonical terminal delivers EOF. */
+            static const uint8_t eof = 0x04;
+
+            return psx_session_write_tty(session, &eof, 1);
+        }
+
+        if(session->tty.slave_fd >= 0) {
+            shutdown(session->tty.slave_fd, SHUT_WR);
+        }
+
+        return 0;
+    }
+
+    /*
+     * PipeTTY has no line discipline: translate Ctrl+C (0x03) into SIGINT
+     * for the foreground process. A real PTY does this in the kernel, so the
+     * byte is forwarded untouched.
+     */
+    if(!session->tty.is_real_pty) {
+        for(size_t i = 0; i < len; i++) {
+            if(payload[i] == 0x03) {
+                if(offset < i &&
+                   psx_session_write_tty(session, payload + offset,
+                                         i - offset) < 0) {
+                    return -1;
+                }
+                offset = i + 1;
+                psx_process_kill(session->proc.pid, SIGINT);
+            }
+        }
+    }
+
+    if(offset < len &&
+       psx_session_write_tty(session, payload + offset, len - offset) < 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+/*
+ * Client input is consumed by the in-process shell until a line starts an
+ * external process; the remainder of the buffer belongs to that process.
+ */
+static int
+session_write_stdin(psx_session_t *session, const uint8_t *payload, size_t len)
+{
+    size_t offset = 0;
+
+    if(session->proc.running) {
+        return session_forward_to_process(session, payload, len);
+    }
+
+    /*
+     * An explicit zero-length STDIN frame means end-of-input: with no
+     * foreground process, the session shell is done (like Ctrl+D on an empty
+     * prompt).
+     */
+    if(len == 0) {
+        if(session->shell) {
+            psh_shell_request_exit(session->shell, 0);
+        }
+        return 0;
+    }
+
+    while(offset < len) {
+        size_t chunk = 0;
+
+        while(offset + chunk < len) {
+            uint8_t byte = payload[offset + chunk];
+
+            chunk++;
+            if(byte == '\n' || byte == '\r') {
+                break;
+            }
+        }
+
+        if(session->shell) {
+            psh_shell_feed(session->shell, payload + offset, chunk);
+        }
+        offset += chunk;
+
+        if(session->proc.running ||
+           (session->shell && psh_shell_exit_requested(session->shell))) {
+            break;
+        }
+    }
+
+    if(offset >= len) {
+        return 0;
+    }
+
+    if(session->proc.running) {
+        return session_forward_to_process(session, payload + offset,
+                                          len - offset);
+    }
+
+    return 0;
+}
+
+int
+psx_session_handle_frame(psx_session_t *session, const ptty_header_t *header,
+                         const uint8_t *payload)
+{
+    if(header->session_id != 0 && header->session_id != session->id) {
+        PSX_LOGW("session %u: frame for session %u rejected", session->id,
+                 header->session_id);
+        return -1;
+    }
+
+    switch(header->type) {
+    case PTTY_MSG_STDIN:
+        return session_write_stdin(session, payload, header->payload_length);
+
+    case PTTY_MSG_RESIZE: {
+        uint16_t rows = 0;
+        uint16_t cols = 0;
+
+        if(ptty_resize_decode(payload, &rows, &cols) < 0) {
+            PSX_LOGW("session %u: malformed RESIZE", session->id);
+            return -1;
+        }
+
+        session->rows = rows;
+        session->cols = cols;
+        psx_tty_set_size(&session->tty, rows, cols);
+        return 0;
+    }
+
+    case PTTY_MSG_SIGNAL: {
+        int signo = header->payload_length == 1 ? payload[0] : SIGINT;
+
+        if(session->proc.running) {
+            psx_process_kill(session->proc.pid, signo);
+        } else if(signo == SIGINT && session->shell) {
+            static const uint8_t ctrl_c = 0x03;
+            psh_shell_feed(session->shell, &ctrl_c, 1);
+        }
+        return 0;
+    }
+
+    case PTTY_MSG_EXEC:
+        if(session->proc.running) {
+            psx_session_emit(session, PTTY_MSG_STDERR, "psh: busy\r\n", 11);
+            return 0;
+        }
+        if(session->shell && header->payload_length > 0) {
+            char line[PSH_LINE_MAX];
+            size_t len = header->payload_length;
+            int status;
+
+            if(len >= sizeof(line)) {
+                len = sizeof(line) - 1;
+            }
+            memcpy(line, payload, len);
+            line[len] = '\0';
+
+            session->exec_pending = true;
+            status = psh_shell_execute_line(session->shell, line);
+
+            if(session->proc.running) {
+                /* EXIT frames are emitted when the process finishes. */
+                return 0;
+            }
+
+            session->exec_pending = false;
+            psx_session_emit_exit(session, status, PTTY_EXIT_SHELL);
+
+            if(!psh_shell_exit_requested(session->shell)) {
+                psh_shell_prompt(session->shell);
+            }
+        }
+        return 0;
+
+    case PTTY_MSG_PING:
+        return psx_session_emit(session, PTTY_MSG_PONG, payload,
+                                header->payload_length) < 0
+                   ? -1
+                   : 0;
+
+    case PTTY_MSG_PONG:
+        return 0;
+
+    case PTTY_MSG_CLOSE:
+        session->state = PSX_SESSION_CLOSING;
+        return 1;
+
+    default:
+        PSX_LOGW("session %u: unexpected %s frame", session->id,
+                 ptty_msg_name(header->type));
+        return -1;
+    }
+}
+
+int
+psx_session_on_socket_readable(psx_session_t *session)
+{
+    for(;;) {
+        ptty_header_t header;
+        const uint8_t *payload = NULL;
+        ptty_read_result_t rc;
+        int handled;
+
+        rc = ptty_read_frame(&session->reader, &header, &payload);
+
+        if(rc == PTTY_READ_AGAIN) {
+            return 0;
+        }
+        if(rc == PTTY_READ_EOF) {
+            PSX_LOGD("session %u: client disconnected", session->id);
+            return -1;
+        }
+        if(rc == PTTY_READ_ERROR) {
+            PSX_LOGW("session %u: socket error: %s", session->id,
+                     strerror(errno));
+            return -1;
+        }
+        if(rc == PTTY_READ_PROTOCOL) {
+            PSX_LOGW("session %u: protocol error, closing", session->id);
+            return -1;
+        }
+
+        psx_session_touch(session);
+        handled = psx_session_handle_frame(session, &header, payload);
+
+        if(handled != 0) {
+            return handled;
+        }
+    }
+}
+
+/* --- tty IO ------------------------------------------------------------- */
+
+int
+psx_session_write_tty(psx_session_t *session, const uint8_t *data, size_t len)
+{
+    if(session->tty.master_fd < 0) {
+        errno = ENODEV;
+        return -1;
+    }
+
+    if(psx_buf_append(&session->in, data, len) < 0) {
+        return -1;
+    }
+
+    return psx_session_flush_tty_input(session);
+}
+
+int
+psx_session_flush_tty_input(psx_session_t *session)
+{
+    if(psx_buf_pending(&session->in) == 0) {
+        return 0;
+    }
+
+    if(psx_buf_flush(&session->in, session->tty.master_fd) < 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+size_t
+psx_session_pending_tty_input(const psx_session_t *session)
+{
+    return psx_buf_pending(&session->in);
+}
+
+int
+psx_session_on_tty_readable(psx_session_t *session)
+{
+    uint8_t buffer[4096];
+
+    if(session->tty.master_fd < 0) {
+        return 0;
+    }
+
+    for(;;) {
+        ssize_t n = read(session->tty.master_fd, buffer, sizeof(buffer));
+
+        if(n < 0) {
+            if(errno == EINTR) {
+                continue;
+            }
+            if(errno == EAGAIN || errno == EWOULDBLOCK) {
+                return 0;
+            }
+            /* A real PTY master returns EIO once the last slave is gone. */
+            if(errno == EIO) {
+                return 0;
+            }
+            PSX_LOGW("session %u: tty read: %s", session->id, strerror(errno));
+            return -1;
+        }
+
+        if(n == 0) {
+            return 0;
+        }
+
+        if(psx_session_emit(session, PTTY_MSG_STDOUT, buffer, (size_t)n) < 0) {
+            return -1;
+        }
+    }
+}
+
+/* --- session manager ---------------------------------------------------- */
+
+void
+psx_session_manager_init(psx_session_manager_t *manager, size_t max)
+{
+    memset(manager, 0, sizeof(*manager));
+    manager->max = max ? max : 1;
+    manager->next_id = 1;
+}
+
+psx_session_t *
+psx_session_manager_create(psx_session_manager_t *manager, int sock_fd)
+{
+    psx_session_t *session;
+    uint32_t id;
+
+    if(manager->count >= manager->max) {
+        errno = ENOSPC;
+        return NULL;
+    }
+
+    id = manager->next_id++;
+    if(id == 0) {
+        id = manager->next_id++;
+    }
+
+    if(!(session = psx_session_create(id, sock_fd))) {
+        return NULL;
+    }
+
+    session->manager = manager;
+    session->next = manager->sessions;
+    manager->sessions = session;
+    manager->count++;
+
+    return session;
+}
+
+void
+psx_session_manager_remove(psx_session_manager_t *manager,
+                           psx_session_t *session)
+{
+    psx_session_t **link = &manager->sessions;
+
+    while(*link && *link != session) {
+        link = &(*link)->next;
+    }
+
+    if(!*link) {
+        return;
+    }
+
+    *link = session->next;
+    manager->count--;
+    session->next = NULL;
+
+    psx_session_destroy(session);
+}
+
+psx_session_t *
+psx_session_manager_find(psx_session_manager_t *manager, uint32_t id)
+{
+    for(psx_session_t *s = manager->sessions; s; s = s->next) {
+        if(s->id == id) {
+            return s;
+        }
+    }
+
+    return NULL;
+}
+
+size_t
+psx_session_manager_count(const psx_session_manager_t *manager)
+{
+    return manager->count;
+}

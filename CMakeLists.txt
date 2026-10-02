@@ -35,13 +35,28 @@ if(PSXTERM_PLATFORM STREQUAL "host")
 endif()
 
 # ---------------------------------------------------------------------------
-# Core library: protocol, server, sessions, tty abstraction, shell, platform
+# Core library: protocol, sessions, tty abstraction, shell, platform
 # ---------------------------------------------------------------------------
 set(PSXTERM_CORE_SOURCES
   core/log.c
   core/util.c
   core/protocol.c
+  core/tty.c
+  core/process.c
+  core/session.c
+  shell/shell.c
+  shell/parser.c
+  shell/env.c
+  shell/command_registry.c
+  shell/builtins/builtin_fs.c
+  shell/builtins/builtin_env.c
+  shell/builtins/builtin_sys.c
+  shell/builtins/builtin_help.c
+  shell/builtins/builtin_exit.c
   platform/${PSXTERM_PLATFORM}/platform.c
+  platform/${PSXTERM_PLATFORM}/filesystem.c
+  platform/${PSXTERM_PLATFORM}/tty.c
+  platform/${PSXTERM_PLATFORM}/process.c
 )
 
 add_library(psxterm_core STATIC ${PSXTERM_CORE_SOURCES})
@@ -51,6 +66,27 @@ target_include_directories(psxterm_core PUBLIC
 if(PSXTERM_PLATFORM STREQUAL "host")
   find_package(Threads REQUIRED)
   target_link_libraries(psxterm_core PUBLIC Threads::Threads)
+endif()
+
+# psxtermd: the daemon (also the payload entry point on PS4/PS5)
+add_executable(psxtermd core/server.c)
+target_link_libraries(psxtermd PRIVATE psxterm_core)
+
+# psxterm-ttyprobe: runtime TTY capability probe
+add_executable(psxterm-ttyprobe tools/ttyprobe.c)
+target_link_libraries(psxterm-ttyprobe PRIVATE psxterm_core)
+
+# cli_test: controlled external-execution target (host integration tests and
+# PS4/PS5 payload ELF).
+add_executable(cli_test tools/cli_test.c)
+if(NOT PSXTERM_PLATFORM STREQUAL "host")
+  set_target_properties(cli_test PROPERTIES SUFFIX ".elf")
+endif()
+
+# Host client: POSIX terminals only, not part of the console payloads.
+if(PSXTERM_PLATFORM STREQUAL "host")
+  add_executable(psxterm client/client.c)
+  target_link_libraries(psxterm PRIVATE psxterm_core)
 endif()
 
 # ---------------------------------------------------------------------------

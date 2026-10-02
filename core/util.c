@@ -115,6 +115,27 @@ psx_parse_int(const char *s, int *out)
     return true;
 }
 
+int
+psx_path_join(char *out, size_t out_cap, const char *a, const char *b)
+{
+    size_t a_len = strlen(a);
+    size_t b_len = strlen(b);
+    bool needs_sep = a_len > 0 && a[a_len - 1] != '/';
+
+    if(a_len + (needs_sep ? 1 : 0) + b_len + 1 > out_cap) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    memcpy(out, a, a_len);
+    if(needs_sep) {
+        out[a_len++] = '/';
+    }
+    memcpy(out + a_len, b, b_len + 1);
+
+    return 0;
+}
+
 void
 psx_buf_init(psx_buf_t *buf)
 {

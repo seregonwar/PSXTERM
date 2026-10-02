@@ -37,6 +37,8 @@ typedef enum {
     PTTY_MSG_OPEN = 3,
     PTTY_MSG_OPEN_OK = 4,
     PTTY_MSG_CLOSE = 5,
+    /* STDIN carries raw keyboard bytes. A zero-length STDIN payload is an
+     * end-of-file marker for the foreground process. */
     PTTY_MSG_STDIN = 6,
     PTTY_MSG_STDOUT = 7,
     PTTY_MSG_STDERR = 8,
