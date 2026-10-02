@@ -35,6 +35,10 @@ main(int argc, char **argv)
     setvbuf(stdout, NULL, _IOLBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
 
+    /* Raw markers on the descriptors, so a run that hangs still shows how far
+     * it got even when libc stdio is the thing under suspicion. */
+    (void)write(STDOUT_FILENO, "CLI-TEST-START\n", 15);
+
     printf("cli_test: argc=%d\n", argc);
     for(int i = 0; i < argc; i++) {
         printf("argv[%d]=%s\n", i, argv[i]);
