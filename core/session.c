@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -23,6 +24,9 @@
 
 #define PSX_EMIT_CHUNK PTTY_MAX_PAYLOAD
 
+static void file_transfer_reset(psx_session_t *session, bool remove_temp);
+static int file_handle_read_request(psx_session_t *session);
+
 psx_session_t *
 psx_session_create(uint32_t id, int sock_fd)
 {
@@ -34,6 +38,7 @@ psx_session_create(uint32_t id, int sock_fd)
 
     session->id = id;
     session->sock_fd = sock_fd;
+    session->file_fd = -1;
     session->state = PSX_SESSION_ACCEPTED;
     session->rows = 24;
     session->cols = 80;
@@ -91,6 +96,7 @@ psx_session_destroy(psx_session_t *session)
     psx_buf_free(&session->in);
     psx_env_clear(&session->env);
     free(session->scrollback);
+    file_transfer_reset(session, true);
 
     if(session->sock_fd >= 0) {
         close(session->sock_fd);
@@ -340,6 +346,12 @@ psx_session_detach(psx_session_t *session)
     if(session->state != PSX_SESSION_RUNNING) {
         return;
     }
+
+    /*
+     * An interrupted transfer must not leave a temporary file behind: the
+     * client is gone and cannot finish the upload.
+     */
+    file_transfer_reset(session, true);
 
     /* Output queued for the departed client is lost; say so honestly. */
     if(psx_buf_pending(&session->out) > 0) {
@@ -597,8 +609,9 @@ psx_session_capabilities(const psx_session_t *session)
 
     caps |= PTTY_CAP_JSON_DIAGNOSTICS;
 
-    /* Persistence is part of this build: sessions survive disconnects. */
+    /* Persistence and chunked file transfer are part of this build. */
     caps |= PTTY_CAP_SESSION_RESUME;
+    caps |= PTTY_CAP_FILE_TRANSFER;
 
     return caps;
 }
@@ -814,6 +827,400 @@ psx_session_check_process(psx_session_t *session)
              (int)session->proc.pid, status);
 
     return true;
+}
+
+/* --- file transfer ------------------------------------------------------ */
+
+#define PSX_FILE_TEMP_SUFFIX ".psxterm-upload"
+
+static uint64_t
+read_le64(const uint8_t *p)
+{
+    return (uint64_t)p[0] | ((uint64_t)p[1] << 8) | ((uint64_t)p[2] << 16) |
+           ((uint64_t)p[3] << 24) | ((uint64_t)p[4] << 32) |
+           ((uint64_t)p[5] << 40) | ((uint64_t)p[6] << 48) |
+           ((uint64_t)p[7] << 56);
+}
+
+static void
+put_le64(uint8_t *p, uint64_t value)
+{
+    for(size_t i = 0; i < 8; i++) {
+        p[i] = (uint8_t)((value >> (8 * i)) & 0xff);
+    }
+}
+
+static void
+file_transfer_reset(psx_session_t *session, bool remove_temp)
+{
+    if(session->file_fd >= 0) {
+        close(session->file_fd);
+    }
+
+    if(remove_temp && session->file_tmp[0]) {
+        unlink(session->file_tmp);
+    }
+
+    session->file_active = false;
+    session->file_fd = -1;
+    session->file_mode = 0;
+    session->file_offset = 0;
+    session->file_size = 0;
+    session->file_written = 0;
+    session->file_path[0] = '\0';
+    session->file_tmp[0] = '\0';
+}
+
+static void
+file_send_result(psx_session_t *session, uint8_t status, int error,
+                 const char *message)
+{
+    uint8_t payload[5 + 128];
+    size_t len = 5;
+
+    payload[0] = status;
+    payload[1] = (uint8_t)((uint32_t)error & 0xff);
+    payload[2] = (uint8_t)(((uint32_t)error >> 8) & 0xff);
+    payload[3] = (uint8_t)(((uint32_t)error >> 16) & 0xff);
+    payload[4] = (uint8_t)(((uint32_t)error >> 24) & 0xff);
+
+    if(message && *message) {
+        size_t n = strlen(message);
+
+        if(n > sizeof(payload) - 5) {
+            n = sizeof(payload) - 5;
+        }
+        memcpy(payload + 5, message, n);
+        len += n;
+    }
+
+    psx_session_emit(session, PTTY_MSG_FILE_RESULT, payload, len);
+}
+
+int
+psx_file_resolve_path(const psx_session_t *session, const uint8_t *raw,
+                      size_t len, char *out, size_t out_cap)
+{
+    char path[PSX_PATH_MAX];
+
+    if(len == 0 || len >= sizeof(path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    if(memchr(raw, '\0', len)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    memcpy(path, raw, len);
+    path[len] = '\0';
+
+    return psx_session_absolute_path(session, path, out, out_cap);
+}
+
+static int
+file_handle_open(psx_session_t *session, const uint8_t *payload, size_t len)
+{
+    uint64_t declared_size;
+    char path[PSX_PATH_MAX];
+    uint8_t reply[9];
+    uint8_t mode;
+    struct stat st;
+
+    if(session->file_active) {
+        file_send_result(session, 1, EBUSY, "a transfer is already active");
+        return PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    if(len < 9) {
+        file_send_result(session, 1, EINVAL, "malformed FILE_OPEN");
+        return PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    mode = payload[0];
+    declared_size = read_le64(payload + 1);
+
+    if(psx_file_resolve_path(session, payload + 9, len - 9, path,
+                             sizeof(path)) < 0) {
+        file_send_result(session, 1, errno, "invalid path");
+        return PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    session->file_fd = -1;
+
+    if(mode == PTTY_FILE_MODE_READ) {
+        if(stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+            file_send_result(session, 1, errno ? errno : EINVAL,
+                             "not a regular file");
+            return PSX_SESSION_FRAME_CONTINUE;
+        }
+
+        if((session->file_fd = open(path, O_RDONLY)) < 0) {
+            file_send_result(session, 1, errno, "cannot open for reading");
+            return PSX_SESSION_FRAME_CONTINUE;
+        }
+
+        session->file_size = (uint64_t)st.st_size;
+    } else if(mode == PTTY_FILE_MODE_WRITE) {
+        uint32_t random = 0;
+        int written;
+
+        if(psx_platform_random_bytes(&random, sizeof(random)) < 0) {
+            random = (uint32_t)psx_now_ms();
+        }
+
+        written = snprintf(session->file_tmp, sizeof(session->file_tmp),
+                           "%s%s-%d-%08x", path, PSX_FILE_TEMP_SUFFIX,
+                           (int)getpid(), (unsigned)random);
+
+        if(written < 0 || (size_t)written >= sizeof(session->file_tmp)) {
+            session->file_tmp[0] = '\0';
+            file_send_result(session, 1, ENAMETOOLONG,
+                             "path too long for a temporary file");
+            return PSX_SESSION_FRAME_CONTINUE;
+        }
+
+        if((session->file_fd = open(session->file_tmp,
+                                    O_CREAT | O_EXCL | O_WRONLY, 0600)) < 0) {
+            file_send_result(session, 1, errno, "cannot create the upload");
+            session->file_tmp[0] = '\0';
+            return PSX_SESSION_FRAME_CONTINUE;
+        }
+
+        session->file_size = declared_size;
+    } else {
+        file_send_result(session, 1, EINVAL, "unknown FILE_OPEN mode");
+        return PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    snprintf(session->file_path, sizeof(session->file_path), "%s", path);
+    session->file_mode = mode;
+    session->file_offset = 0;
+    session->file_written = 0;
+    session->file_active = true;
+
+    reply[0] = 0;
+    put_le64(reply + 1, mode == PTTY_FILE_MODE_READ ? session->file_size : 0);
+    psx_session_emit(session, PTTY_MSG_FILE_OPEN_OK, reply, sizeof(reply));
+
+    return PSX_SESSION_FRAME_CONTINUE;
+}
+
+static int
+file_handle_data(psx_session_t *session, const uint8_t *payload, size_t len)
+{
+    uint64_t offset;
+    const uint8_t *data;
+    size_t data_len;
+    size_t done = 0;
+
+    if(!session->file_active) {
+        file_send_result(session, 1, EINVAL, "no transfer is active");
+        return PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    if(len < 8) {
+        file_send_result(session, 1, EINVAL, "malformed FILE_DATA");
+        return PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    offset = read_le64(payload);
+    data = payload + 8;
+    data_len = len - 8;
+
+    if(session->file_mode == PTTY_FILE_MODE_READ) {
+        /* Client-driven download: FILE_DATA with no bytes requests a chunk
+         * starting at the given offset. */
+        if(data_len != 0) {
+            file_send_result(session, 1, EINVAL,
+                             "download requests carry no data");
+            return PSX_SESSION_FRAME_CONTINUE;
+        }
+
+        if(offset > session->file_size) {
+            file_send_result(session, 1, EINVAL, "offset beyond the file");
+            return PSX_SESSION_FRAME_CONTINUE;
+        }
+
+        session->file_offset = offset;
+        return file_handle_read_request(session);
+    }
+
+    if(offset != session->file_offset) {
+        file_send_result(session, 1, EINVAL, "unexpected offset");
+        return PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    while(done < data_len) {
+        ssize_t n = pwrite(session->file_fd, data + done, data_len - done,
+                           (off_t)(offset + done));
+
+        if(n < 0) {
+            if(errno == EINTR) {
+                continue;
+            }
+            file_transfer_reset(session, true);
+            file_send_result(session, 1, errno, "write failed");
+            return PSX_SESSION_FRAME_CONTINUE;
+        }
+
+        done += (size_t)n;
+    }
+
+    session->file_offset += data_len;
+    session->file_written += data_len;
+
+    return PSX_SESSION_FRAME_CONTINUE;
+}
+
+static int
+file_handle_seek(psx_session_t *session, const uint8_t *payload, size_t len)
+{
+    uint64_t offset;
+
+    if(!session->file_active || len < 8) {
+        file_send_result(session, 1, EINVAL, "no transfer is active");
+        return PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    offset = read_le64(payload);
+
+    if(session->file_mode == PTTY_FILE_MODE_READ) {
+        if(offset > session->file_size) {
+            file_send_result(session, 1, EINVAL, "seek beyond the file");
+            return PSX_SESSION_FRAME_CONTINUE;
+        }
+    } else if(offset > session->file_written) {
+        file_send_result(session, 1, EINVAL, "seek beyond written data");
+        return PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    session->file_offset = offset;
+    file_send_result(session, 0, 0, NULL);
+
+    return PSX_SESSION_FRAME_CONTINUE;
+}
+
+static int
+file_handle_close(psx_session_t *session)
+{
+    if(!session->file_active) {
+        file_send_result(session, 1, EINVAL, "no transfer is active");
+        return PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    if(session->file_mode == PTTY_FILE_MODE_READ) {
+        file_transfer_reset(session, false);
+        file_send_result(session, 0, 0, NULL);
+        return PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    /* Upload: never leave a partially written final file behind. */
+    if(session->file_size != PTTY_FILE_SIZE_UNKNOWN &&
+       session->file_written != session->file_size) {
+        char message[128];
+        int error = EMSGSIZE;
+
+        snprintf(message, sizeof(message),
+                 "size mismatch: expected %llu bytes, received %llu",
+                 (unsigned long long)session->file_size,
+                 (unsigned long long)session->file_written);
+        file_transfer_reset(session, true);
+        file_send_result(session, 1, error, message);
+        return PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    if(session->file_fd >= 0) {
+        if(fsync(session->file_fd) != 0 || close(session->file_fd) != 0) {
+            int error = errno;
+
+            session->file_fd = -1;
+            file_transfer_reset(session, true);
+            file_send_result(session, 1, error, "cannot flush the upload");
+            return PSX_SESSION_FRAME_CONTINUE;
+        }
+        session->file_fd = -1;
+    }
+
+    if(rename(session->file_tmp, session->file_path) != 0) {
+        int error = errno;
+
+        file_transfer_reset(session, true);
+        file_send_result(session, 1, error, "cannot move the upload into place");
+        return PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    file_transfer_reset(session, false);
+    file_send_result(session, 0, 0, NULL);
+
+    return PSX_SESSION_FRAME_CONTINUE;
+}
+
+static int
+file_handle_stat(psx_session_t *session, const uint8_t *payload, size_t len)
+{
+    char path[PSX_PATH_MAX];
+    struct stat st;
+    uint8_t reply[10];
+
+    if(psx_file_resolve_path(session, payload, len, path, sizeof(path)) < 0) {
+        file_send_result(session, 1, errno, "invalid path");
+        return PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    if(stat(path, &st) != 0) {
+        file_send_result(session, 1, errno, "stat failed");
+        return PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    reply[0] = 0;
+    put_le64(reply + 1, (uint64_t)st.st_size);
+    reply[9] = S_ISREG(st.st_mode)
+                   ? PTTY_FILE_TYPE_REGULAR
+                   : (S_ISDIR(st.st_mode) ? PTTY_FILE_TYPE_DIRECTORY
+                                          : PTTY_FILE_TYPE_OTHER);
+
+    psx_session_emit(session, PTTY_MSG_FILE_RESULT, reply, sizeof(reply));
+
+    return PSX_SESSION_FRAME_CONTINUE;
+}
+
+/*
+ * Streams the next chunk of an open read transfer. The client drives the
+ * pace: every FILE_DATA it receives is one chunk, so nothing is buffered
+ * beyond the current frame.
+ */
+static int
+file_handle_read_request(psx_session_t *session)
+{
+    uint8_t chunk[4096];
+    uint8_t payload[8 + sizeof(chunk)];
+    ssize_t n;
+
+    n = pread(session->file_fd, chunk, sizeof(chunk),
+              (off_t)session->file_offset);
+
+    if(n < 0) {
+        file_transfer_reset(session, false);
+        file_send_result(session, 1, errno, "read failed");
+        return PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    if(n == 0) {
+        /* End of file: close implicitly and report success. */
+        file_transfer_reset(session, false);
+        file_send_result(session, 0, 0, NULL);
+        return PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    put_le64(payload, session->file_offset);
+    memcpy(payload + 8, chunk, (size_t)n);
+    session->file_offset += (size_t)n;
+
+    psx_session_emit(session, PTTY_MSG_FILE_DATA, payload, 8 + (size_t)n);
+
+    return PSX_SESSION_FRAME_CONTINUE;
 }
 
 /* --- socket IO ---------------------------------------------------------- */
@@ -1083,6 +1490,21 @@ psx_session_handle_frame(psx_session_t *session, const ptty_header_t *header,
                    ? PSX_SESSION_FRAME_ERROR
                    : PSX_SESSION_FRAME_CONTINUE;
     }
+
+    case PTTY_MSG_FILE_OPEN:
+        return file_handle_open(session, payload, header->payload_length);
+
+    case PTTY_MSG_FILE_DATA:
+        return file_handle_data(session, payload, header->payload_length);
+
+    case PTTY_MSG_FILE_SEEK:
+        return file_handle_seek(session, payload, header->payload_length);
+
+    case PTTY_MSG_FILE_CLOSE:
+        return file_handle_close(session);
+
+    case PTTY_MSG_FILE_STAT:
+        return file_handle_stat(session, payload, header->payload_length);
 
     case PTTY_MSG_DETACH:
         return PSX_SESSION_FRAME_DETACH;

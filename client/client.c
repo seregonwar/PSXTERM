@@ -9,6 +9,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <poll.h>
 #include <signal.h>
@@ -18,6 +19,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -28,6 +30,7 @@
 
 #define CLIENT_NAME "psxterm/" PSXTERM_VERSION_STRING
 #define EXIT_USAGE 64
+#define CLIENT_PATH_MAX 768
 
 static struct termios g_saved_termios;
 static bool g_raw_mode;
@@ -779,6 +782,328 @@ run_attach(int fd, ptty_reader_t *reader, uint32_t session_id,
     }
 }
 
+/* --- file transfer ------------------------------------------------------ */
+
+#define PSX_FILE_CHUNK (32 * 1024)
+#define PTTY_FILE_OK 0
+
+static void
+file_put_le64(uint8_t *p, uint64_t value)
+{
+    for(size_t i = 0; i < 8; i++) {
+        p[i] = (uint8_t)((value >> (8 * i)) & 0xff);
+    }
+}
+
+static uint64_t
+file_get_le64(const uint8_t *p)
+{
+    return (uint64_t)p[0] | ((uint64_t)p[1] << 8) | ((uint64_t)p[2] << 16) |
+           ((uint64_t)p[3] << 24) | ((uint64_t)p[4] << 32) |
+           ((uint64_t)p[5] << 40) | ((uint64_t)p[6] << 48) |
+           ((uint64_t)p[7] << 56);
+}
+
+typedef struct {
+    uint8_t status;
+    uint64_t size;
+    uint8_t type;
+    char message[128];
+    bool is_open_ok;
+    /* Set when a download chunk was read while waiting; the pointer is valid
+     * until the next read on the same reader. */
+    const uint8_t *chunk;
+    size_t chunk_len;
+} file_reply_t;
+
+/*
+ * Waits for the reply to a file request. FILE_RESULT carries success/error
+ * (and, for a stat request, size and type); FILE_OPEN_OK carries the size.
+ */
+static int
+file_wait_reply(ptty_reader_t *reader, int fd, file_reply_t *reply)
+{
+    memset(reply, 0, sizeof(*reply));
+
+    for(;;) {
+        ptty_header_t header;
+        const uint8_t *payload = NULL;
+
+        if(wait_frame(reader, fd, &header, &payload, 60000) != 0) {
+            return -1;
+        }
+
+        switch(header.type) {
+        case PTTY_MSG_FILE_OPEN_OK:
+            if(header.payload_length < 9) {
+                return -1;
+            }
+            reply->status = payload[0];
+            reply->size = file_get_le64(payload + 1);
+            reply->is_open_ok = true;
+            return 0;
+
+        case PTTY_MSG_FILE_RESULT:
+            if(header.payload_length < 1) {
+                return -1;
+            }
+            reply->status = payload[0];
+            if(reply->status == PTTY_FILE_OK && header.payload_length >= 10) {
+                reply->size = file_get_le64(payload + 1);
+                reply->type = payload[9];
+            } else if(reply->status != PTTY_FILE_OK &&
+                      header.payload_length > 5) {
+                size_t n = header.payload_length - 5;
+
+                if(n >= sizeof(reply->message)) {
+                    n = sizeof(reply->message) - 1;
+                }
+                memcpy(reply->message, payload + 5, n);
+                reply->message[n] = '\0';
+                if(!reply->message[0] && header.payload_length >= 5) {
+                    snprintf(reply->message, sizeof(reply->message),
+                             "errno %u", (unsigned)((uint32_t)payload[1] |
+                                                    ((uint32_t)payload[2] << 8) |
+                                                    ((uint32_t)payload[3] << 16) |
+                                                    ((uint32_t)payload[4] << 24)));
+                }
+            }
+            return 0;
+
+        case PTTY_MSG_FILE_DATA:
+            /* A download chunk; hand it to the caller instead of consuming it
+             * a second time. */
+            reply->chunk = payload;
+            reply->chunk_len = header.payload_length;
+            return 1;
+
+        case PTTY_MSG_PING:
+            send_frame(fd, PTTY_MSG_PONG, payload, header.payload_length);
+            break;
+
+        case PTTY_MSG_CLOSE:
+            return -1;
+
+        default:
+            break;
+        }
+    }
+}
+
+static int
+file_open_request(int fd, uint8_t mode, uint64_t size, const char *path)
+{
+    size_t path_len = strlen(path);
+    uint8_t payload[9 + CLIENT_PATH_MAX];
+
+    if(path_len == 0 || 9 + path_len > sizeof(payload)) {
+        fprintf(stderr, "psxterm: invalid remote path\n");
+        return -1;
+    }
+
+    payload[0] = mode;
+    file_put_le64(payload + 1, size);
+    memcpy(payload + 9, path, path_len);
+
+    return send_frame(fd, PTTY_MSG_FILE_OPEN, payload, 9 + path_len);
+}
+
+static int
+run_push(int fd, ptty_reader_t *reader, const char *local, const char *remote)
+{
+    file_reply_t reply;
+    struct stat st;
+    int file_fd;
+    uint8_t frame_buf[8 + PSX_FILE_CHUNK];
+    uint64_t offset = 0;
+
+    if(stat(local, &st) != 0 || !S_ISREG(st.st_mode)) {
+        fprintf(stderr, "psxterm: %s: %s\n", local, strerror(errno));
+        return 1;
+    }
+
+    if((file_fd = open(local, O_RDONLY)) < 0) {
+        fprintf(stderr, "psxterm: %s: %s\n", local, strerror(errno));
+        return 1;
+    }
+
+    if(file_open_request(fd, PTTY_FILE_MODE_WRITE, (uint64_t)st.st_size,
+                         remote) < 0 ||
+       file_wait_reply(reader, fd, &reply) != 0) {
+        fprintf(stderr, "psxterm: upload handshake failed\n");
+        close(file_fd);
+        return 1;
+    }
+
+    if(reply.status != PTTY_FILE_OK) {
+        fprintf(stderr, "psxterm: %s: %s\n", remote,
+                reply.message[0] ? reply.message : "upload refused");
+        close(file_fd);
+        return 1;
+    }
+
+    for(;;) {
+        ssize_t n = read(file_fd, frame_buf + 8, PSX_FILE_CHUNK);
+
+        if(n < 0) {
+            if(errno == EINTR) {
+                continue;
+            }
+            fprintf(stderr, "psxterm: %s: %s\n", local, strerror(errno));
+            close(file_fd);
+            return 1;
+        }
+        if(n == 0) {
+            break;
+        }
+
+        file_put_le64(frame_buf, offset);
+        if(send_frame(fd, PTTY_MSG_FILE_DATA, frame_buf, 8 + (size_t)n) < 0) {
+            fprintf(stderr, "psxterm: upload interrupted\n");
+            close(file_fd);
+            return 1;
+        }
+        offset += (uint64_t)n;
+    }
+
+    close(file_fd);
+
+    if(send_frame(fd, PTTY_MSG_FILE_CLOSE, NULL, 0) < 0 ||
+       file_wait_reply(reader, fd, &reply) != 0) {
+        fprintf(stderr, "psxterm: upload completion failed\n");
+        return 1;
+    }
+
+    if(reply.status != PTTY_FILE_OK) {
+        fprintf(stderr, "psxterm: %s: %s\n", remote,
+                reply.message[0] ? reply.message : "upload rejected");
+        return 1;
+    }
+
+    printf("pushed %llu bytes to %s\n", (unsigned long long)offset, remote);
+
+    return 0;
+}
+
+static int
+run_pull(int fd, ptty_reader_t *reader, const char *remote, const char *local)
+{
+    char tmp[CLIENT_PATH_MAX];
+    file_reply_t reply;
+    uint64_t offset = 0;
+    int out_fd;
+    int written;
+
+    if(file_open_request(fd, PTTY_FILE_MODE_READ, PTTY_FILE_SIZE_UNKNOWN,
+                         remote) < 0 ||
+       file_wait_reply(reader, fd, &reply) != 0) {
+        fprintf(stderr, "psxterm: download handshake failed\n");
+        return 1;
+    }
+
+    if(reply.status != PTTY_FILE_OK) {
+        fprintf(stderr, "psxterm: %s: %s\n", remote,
+                reply.message[0] ? reply.message : "download refused");
+        return 1;
+    }
+
+    written = snprintf(tmp, sizeof(tmp), "%s.psxterm-download-%d", local,
+                       (int)getpid());
+    if(written < 0 || (size_t)written >= sizeof(tmp)) {
+        fprintf(stderr, "psxterm: local path too long\n");
+        return 1;
+    }
+
+    if((out_fd = open(tmp, O_CREAT | O_EXCL | O_WRONLY, 0600)) < 0) {
+        fprintf(stderr, "psxterm: %s: %s\n", local, strerror(errno));
+        return 1;
+    }
+
+    for(;;) {
+        uint8_t request[8];
+
+        file_put_le64(request, offset);
+        if(send_frame(fd, PTTY_MSG_FILE_DATA, request, sizeof(request)) < 0) {
+            fprintf(stderr, "psxterm: download interrupted\n");
+            close(out_fd);
+            unlink(tmp);
+            return 1;
+        }
+
+        {
+            int rc = file_wait_reply(reader, fd, &reply);
+
+            if(rc < 0) {
+                fprintf(stderr, "psxterm: download interrupted\n");
+                close(out_fd);
+                unlink(tmp);
+                return 1;
+            }
+
+            if(rc == 1) {
+                const uint8_t *data_payload = reply.chunk;
+                size_t data_len = reply.chunk_len;
+
+                if(!data_payload || data_len < 8) {
+                    fprintf(stderr, "psxterm: malformed download chunk\n");
+                    close(out_fd);
+                    unlink(tmp);
+                    return 1;
+                }
+
+                {
+                    uint64_t chunk_offset = file_get_le64(data_payload);
+                    size_t chunk_len = data_len - 8;
+
+                    if(chunk_offset != offset) {
+                        fprintf(stderr, "psxterm: download offset mismatch\n");
+                        close(out_fd);
+                        unlink(tmp);
+                        return 1;
+                    }
+
+                    if(chunk_len > 0) {
+                        if(write_all(out_fd, data_payload + 8, chunk_len) < 0) {
+                            fprintf(stderr, "psxterm: %s: %s\n", local,
+                                    strerror(errno));
+                            close(out_fd);
+                            unlink(tmp);
+                            return 1;
+                        }
+                        offset += chunk_len;
+                    }
+                }
+                continue;
+            }
+
+            if(reply.status != PTTY_FILE_OK) {
+                fprintf(stderr, "psxterm: %s: %s\n", remote,
+                        reply.message[0] ? reply.message : "download failed");
+                close(out_fd);
+                unlink(tmp);
+                return 1;
+            }
+            break;
+        }
+    }
+
+    if(fsync(out_fd) != 0 || close(out_fd) != 0) {
+        fprintf(stderr, "psxterm: %s: %s\n", local, strerror(errno));
+        unlink(tmp);
+        return 1;
+    }
+
+    if(rename(tmp, local) != 0) {
+        fprintf(stderr, "psxterm: %s: %s\n", local, strerror(errno));
+        unlink(tmp);
+        return 1;
+    }
+
+    printf("pulled %llu bytes to %s\n", (unsigned long long)offset, local);
+
+    return 0;
+}
+
 static void
 usage(const char *argv0)
 {
@@ -787,6 +1112,9 @@ usage(const char *argv0)
     printf("       %s sessions [options] <host>\n", argv0);
     printf("       %s attach [options] <host> <session> --resume TOKEN\n",
            argv0);
+    printf("       %s push [options] <host> <local> <remote>\n", argv0);
+    printf("       %s pull [options] <host> <remote> <local>\n", argv0);
+    printf("       %s install [options] <host> <local>\n", argv0);
     printf("\n");
     printf("Connect to a PSXTerm daemon on a PS4/PS5.\n");
     printf("\n");
@@ -799,6 +1127,8 @@ usage(const char *argv0)
     printf("      sessions        list the daemon's sessions\n");
     printf("      attach          resume a detached session\n");
     printf("      --resume TOKEN  32 hex character resume token for attach\n");
+    printf("      push/pull/install  chunked file transfer (atomic uploads,\n");
+    printf("                      install targets /data/psxterm/bin)\n");
     printf("      --print-token   print the session resume token at startup\n");
     printf("      --json          machine-readable diagnostics output\n");
     printf("  -V, --version       print version\n");
@@ -819,6 +1149,11 @@ main(int argc, char **argv)
     bool doctor_mode = false;
     bool sessions_mode = false;
     bool attach_mode = false;
+    bool push_mode = false;
+    bool pull_mode = false;
+    bool install_mode = false;
+    const char *arg_a = NULL;
+    const char *arg_b = NULL;
     uint32_t attach_id = 0;
     bool json = false;
     int fd;
@@ -856,6 +1191,12 @@ main(int argc, char **argv)
             sessions_mode = true;
         } else if(strcmp(arg, "attach") == 0 && !host) {
             attach_mode = true;
+        } else if(strcmp(arg, "push") == 0 && !host) {
+            push_mode = true;
+        } else if(strcmp(arg, "pull") == 0 && !host) {
+            pull_mode = true;
+        } else if(strcmp(arg, "install") == 0 && !host) {
+            install_mode = true;
         } else if(strcmp(arg, "--resume") == 0) {
             if(++i >= argc) {
                 return EXIT_USAGE;
@@ -878,6 +1219,10 @@ main(int argc, char **argv)
             return EXIT_USAGE;
         } else if(!host) {
             host = arg;
+        } else if(!arg_a) {
+            arg_a = arg;
+        } else if(!arg_b) {
+            arg_b = arg;
         } else {
             fprintf(stderr, "psxterm: unexpected argument: %s\n", arg);
             return EXIT_USAGE;
@@ -1011,6 +1356,51 @@ main(int argc, char **argv)
         status = run_sessions(fd, &reader);
         close(fd);
 
+        return status;
+    }
+
+    if(push_mode || pull_mode || install_mode) {
+        int status;
+
+        if(push_mode) {
+            if(!arg_a || !arg_b) {
+                fprintf(stderr, "psxterm: push needs <local> <remote>\n");
+                close(fd);
+                return EXIT_USAGE;
+            }
+            status = run_push(fd, &reader, arg_a, arg_b);
+        } else if(install_mode) {
+            char remote[CLIENT_PATH_MAX];
+            const char *base;
+
+            if(!arg_a) {
+                fprintf(stderr, "psxterm: install needs <local>\n");
+                close(fd);
+                return EXIT_USAGE;
+            }
+
+            base = strrchr(arg_a, '/');
+            base = base ? base + 1 : arg_a;
+
+            if(!*base ||
+               snprintf(remote, sizeof(remote), "/data/psxterm/bin/%s",
+                        base) >= (int)sizeof(remote)) {
+                fprintf(stderr, "psxterm: invalid install path\n");
+                close(fd);
+                return EXIT_USAGE;
+            }
+
+            status = run_push(fd, &reader, arg_a, remote);
+        } else {
+            if(!arg_a || !arg_b) {
+                fprintf(stderr, "psxterm: pull needs <remote> <local>\n");
+                close(fd);
+                return EXIT_USAGE;
+            }
+            status = run_pull(fd, &reader, arg_a, arg_b);
+        }
+
+        close(fd);
         return status;
     }
 

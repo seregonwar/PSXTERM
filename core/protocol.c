@@ -402,6 +402,13 @@ ptty_msg_name(uint8_t type)
     case PTTY_MSG_SESSIONS_REQUEST: return "SESSIONS_REQUEST";
     case PTTY_MSG_SESSIONS_DATA: return "SESSIONS_DATA";
     case PTTY_MSG_SESSIONS_DONE: return "SESSIONS_DONE";
+    case PTTY_MSG_FILE_OPEN: return "FILE_OPEN";
+    case PTTY_MSG_FILE_OPEN_OK: return "FILE_OPEN_OK";
+    case PTTY_MSG_FILE_DATA: return "FILE_DATA";
+    case PTTY_MSG_FILE_SEEK: return "FILE_SEEK";
+    case PTTY_MSG_FILE_CLOSE: return "FILE_CLOSE";
+    case PTTY_MSG_FILE_RESULT: return "FILE_RESULT";
+    case PTTY_MSG_FILE_STAT: return "FILE_STAT";
     default: return "UNKNOWN";
     }
 }

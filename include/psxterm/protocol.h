@@ -79,8 +79,44 @@ typedef enum {
     PTTY_MSG_SESSION_INFO = 23,
     PTTY_MSG_SESSIONS_REQUEST = 24,
     PTTY_MSG_SESSIONS_DATA = 25,
-    PTTY_MSG_SESSIONS_DONE = 26
+    PTTY_MSG_SESSIONS_DONE = 26,
+    /*
+     * Native file transfer. Always explicit frames, never overloaded on
+     * STDIN/STDOUT, and chunked so a file larger than one frame never needs
+     * to fit in memory.
+     *
+     * FILE_OPEN   : u8 mode || u64 size || path (UTF-8, not NUL terminated)
+     * FILE_OPEN_OK: u8 status || u64 size (actual size for reads, 0 for
+     *               writes)
+     * FILE_DATA   : u64 offset || bytes (the payload is line-oriented data,
+     *               so the offset keeps the format resumable)
+     * FILE_SEEK   : u64 offset
+     * FILE_CLOSE  : empty; for writes this finalizes the upload
+     * FILE_RESULT : u8 status || u32 errno || message (status 0 = success;
+     *               also the reply to FILE_STAT with u8 status || u64 size ||
+     *               u8 type)
+     * FILE_STAT   : path
+     */
+    PTTY_MSG_FILE_OPEN = 27,
+    PTTY_MSG_FILE_OPEN_OK = 28,
+    PTTY_MSG_FILE_DATA = 29,
+    PTTY_MSG_FILE_SEEK = 30,
+    PTTY_MSG_FILE_CLOSE = 31,
+    PTTY_MSG_FILE_RESULT = 32,
+    PTTY_MSG_FILE_STAT = 33
 } ptty_msg_type_t;
+
+/* FILE_OPEN modes */
+#define PTTY_FILE_MODE_READ 0u
+#define PTTY_FILE_MODE_WRITE 1u
+
+/* Declared size when the sender does not know it in advance. */
+#define PTTY_FILE_SIZE_UNKNOWN 0xffffffffffffffffull
+
+/* FILE_RESULT / FILE_STAT type byte */
+#define PTTY_FILE_TYPE_REGULAR 0u
+#define PTTY_FILE_TYPE_DIRECTORY 1u
+#define PTTY_FILE_TYPE_OTHER 2u
 
 /* DIAG_REQUEST flags */
 #define PTTY_DIAG_FLAG_JSON 0x01u

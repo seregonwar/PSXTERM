@@ -27,7 +27,20 @@ MAX_PAYLOAD = 65536
 (HELLO, HELLO_ACK, OPEN, OPEN_OK, CLOSE, STDIN, STDOUT, STDERR, RESIZE, SIGNAL,
  EXEC, EXIT, PING, PONG, DIAG_REQUEST, DIAG_DATA, DIAG_DONE, CAPS, DETACH,
  ATTACH, ATTACH_OK, ATTACH_FAIL, SESSION_INFO, SESSIONS_REQUEST, SESSIONS_DATA,
- SESSIONS_DONE) = range(1, 27)
+ SESSIONS_DONE, FILE_OPEN, FILE_OPEN_OK, FILE_DATA, FILE_SEEK, FILE_CLOSE,
+ FILE_RESULT, FILE_STAT) = range(1, 34)
+
+(FILE_MODE_READ, FILE_MODE_WRITE) = (0, 1)
+FILE_SIZE_UNKNOWN = 0xffffffffffffffff
+FILE_TYPE_REGULAR = 0
+
+
+def file_open_payload(mode, size, path):
+    return struct.pack("<BQ", mode, size) + path.encode()
+
+
+def file_data_payload(offset, data):
+    return struct.pack("<Q", offset) + data
 
 (CAP_REAL_PTY, CAP_PIPE_TTY, CAP_EXEC, CAP_FILE_TRANSFER, CAP_SESSION_RESUME,
  CAP_JOB_CONTROL, CAP_AUTH_CHALLENGE, CAP_COMPRESSION,
@@ -830,6 +843,8 @@ def test_capabilities_advertised():
               "real pty without job control: 0x%08x" % caps)
         check(not (caps & CAP_COMPRESSION),
               "COMPRESSION must not be advertised while unimplemented")
+        check(caps & CAP_FILE_TRANSFER, "FILE_TRANSFER not advertised")
+        check(caps & CAP_SESSION_RESUME, "SESSION_RESUME not advertised")
 
         text, status = client.diag()
         check("capabilities" in text and "job-control" in text,
@@ -1072,6 +1087,196 @@ def test_client_binary_sessions_and_attach_errors():
               "missing --resume rc=%d" % missing.returncode)
 
 
+def test_file_push_pull_roundtrip():
+    remote = "/tmp/psxterm-push-pull.bin"
+
+    with Daemon() as daemon:
+        client = Client(daemon)
+        client.drain()
+
+        data = bytes(range(256)) * 800  # 204800 bytes: several frames
+        if os.path.exists(remote):
+            os.unlink(remote)
+
+        client.send(FILE_OPEN, file_open_payload(FILE_MODE_WRITE, len(data),
+                                                 remote))
+        header, payload = client.read_frame(timeout=10)
+        check(header[0] == FILE_OPEN_OK and payload[0] == 0,
+              "push open failed: %r" % (payload[:16],))
+
+        for offset in range(0, len(data), 32768):
+            client.send(FILE_DATA,
+                        file_data_payload(offset, data[offset:offset + 32768]))
+            time.sleep(0.005)
+
+        client.send(FILE_CLOSE)
+        header, payload = client.read_frame(timeout=10)
+        check(header[0] == FILE_RESULT and payload[0] == 0,
+              "push failed: %r" % (payload[:32],))
+        check(os.path.exists(remote), "pushed file missing on disk")
+        with open(remote, "rb") as handle:
+            check(handle.read() == data, "pushed content differs")
+
+        # Pull it back through the protocol.
+        client.send(FILE_OPEN, file_open_payload(FILE_MODE_READ,
+                                                 FILE_SIZE_UNKNOWN, remote))
+        header, payload = client.read_frame(timeout=10)
+        check(header[0] == FILE_OPEN_OK, "pull open failed")
+        check(struct.unpack("<Q", payload[1:9])[0] == len(data),
+              "reported size differs")
+
+        got = bytearray()
+        while True:
+            client.send(FILE_DATA, struct.pack("<Q", len(got)))
+            header, payload = client.read_frame(timeout=10)
+
+            if header[0] == FILE_DATA:
+                check(struct.unpack("<Q", payload[:8])[0] == len(got),
+                      "download offset mismatch")
+                got += payload[8:]
+                continue
+
+            check(header[0] == FILE_RESULT and payload[0] == 0,
+                  "pull failed: %r" % (payload[:32],))
+            break
+
+        check(bytes(got) == data, "pulled content differs (%d bytes)" % len(got))
+        os.unlink(remote)
+        client.close()
+
+
+def test_file_upload_is_atomic_on_failure():
+    target = "/tmp/psxterm-atomic.bin"
+
+    with Daemon() as daemon:
+        client = Client(daemon)
+        client.drain()
+
+        if os.path.exists(target):
+            os.unlink(target)
+
+        client.send(FILE_OPEN, file_open_payload(FILE_MODE_WRITE, 1000, target))
+        header, payload = client.read_frame(timeout=10)
+        check(header[0] == FILE_OPEN_OK, "open failed")
+
+        client.send(FILE_DATA, file_data_payload(0, b"x" * 100))
+        client.send(FILE_CLOSE)
+        header, payload = client.read_frame(timeout=10)
+
+        check(header[0] == FILE_RESULT and payload[0] != 0,
+              "size mismatch was accepted")
+        check(not os.path.exists(target),
+              "a partial upload was published as the final file")
+
+        leftovers = [name for name in os.listdir("/tmp")
+                     if name.startswith("psxterm-atomic.bin.psxterm-upload")]
+        check(not leftovers, "temporary upload file left behind: %r" % leftovers)
+        client.close()
+
+
+def test_file_stat_and_missing_file():
+    known = "/tmp/psxterm-stat.bin"
+
+    with Daemon() as daemon:
+        client = Client(daemon)
+        client.drain()
+
+        with open(known, "wb") as handle:
+            handle.write(b"st" * 40)
+
+        client.send(FILE_STAT, known.encode())
+        header, payload = client.read_frame(timeout=10)
+        check(header[0] == FILE_RESULT and payload[0] == 0, "stat failed")
+        check(struct.unpack("<Q", payload[1:9])[0] == 80, "stat size wrong")
+        check(payload[9] == FILE_TYPE_REGULAR, "stat type wrong")
+
+        client.send(FILE_STAT, b"/tmp/psxterm-does-not-exist.bin")
+        header, payload = client.read_frame(timeout=10)
+        check(header[0] == FILE_RESULT and payload[0] != 0,
+              "stat of a missing file succeeded")
+
+        client.send(FILE_OPEN, file_open_payload(FILE_MODE_READ,
+                                                 FILE_SIZE_UNKNOWN,
+                                                 "/tmp/psxterm-does-not-exist.bin"))
+        header, payload = client.read_frame(timeout=10)
+        check(header[0] == FILE_RESULT and payload[0] != 0,
+              "open of a missing file succeeded")
+
+        os.unlink(known)
+        client.close()
+
+
+def test_file_path_safety():
+    with Daemon() as daemon:
+        client = Client(daemon)
+        client.drain()
+
+        # Empty path.
+        client.send(FILE_STAT, b"")
+        header, payload = client.read_frame(timeout=10)
+        check(header[0] == FILE_RESULT and payload[0] != 0,
+              "empty path accepted")
+
+        # Embedded NUL byte.
+        client.send(FILE_STAT, b"/tmp/bad\x00name")
+        header, payload = client.read_frame(timeout=10)
+        check(header[0] == FILE_RESULT and payload[0] != 0,
+              "path with an embedded NUL accepted")
+
+        # Path longer than the resolver limit.
+        client.send(FILE_STAT, b"/tmp/" + b"a" * 900)
+        header, payload = client.read_frame(timeout=10)
+        check(header[0] == FILE_RESULT and payload[0] != 0,
+              "oversized path accepted")
+
+        client.close()
+
+
+def test_client_binary_push_pull():
+    src = "/tmp/psxterm-client-src.bin"
+    dst = "/tmp/psxterm-client-dst.bin"
+    remote = "/tmp/psxterm-client-remote.bin"
+    payload = bytes((i * 7 + 3) & 0xff for i in range(100000))
+
+    with Daemon() as daemon:
+        psxterm = os.path.join(BUILD, "psxterm")
+
+        with open(src, "wb") as handle:
+            handle.write(payload)
+
+        for path in (dst, remote):
+            if os.path.exists(path):
+                os.unlink(path)
+
+        pushed = subprocess.run(
+            [psxterm, "push", "127.0.0.1", src, remote, "-p", str(daemon.port)],
+            capture_output=True, text=True, timeout=60)
+        check(pushed.returncode == 0,
+              "push rc=%d stderr=%s" % (pushed.returncode, pushed.stderr))
+        check("pushed" in pushed.stdout, "push output: %r" % pushed.stdout)
+
+        pulled = subprocess.run(
+            [psxterm, "pull", "127.0.0.1", remote, dst, "-p", str(daemon.port)],
+            capture_output=True, text=True, timeout=60)
+        check(pulled.returncode == 0,
+              "pull rc=%d stderr=%s" % (pulled.returncode, pulled.stderr))
+
+        with open(dst, "rb") as handle:
+            check(handle.read() == payload, "client roundtrip content differs")
+
+        failed = subprocess.run(
+            [psxterm, "push", "127.0.0.1", src, "/nonexistent-dir/x.bin",
+             "-p", str(daemon.port)],
+            capture_output=True, text=True, timeout=60)
+        check(failed.returncode == 1, "push to a bad path rc=%d"
+              % failed.returncode)
+        check(failed.stderr.strip() != "", "no error message for a failed push")
+
+        for path in (src, dst, remote):
+            if os.path.exists(path):
+                os.unlink(path)
+
+
 def test_handshake_timeout():
     with Daemon("--handshake-timeout", "300") as daemon:
         sock = socket.create_connection(("127.0.0.1", daemon.port), 3.0)
@@ -1153,6 +1358,11 @@ TESTS = [
     test_sessions_listing_reports_detached,
     test_no_persist_destroys_session_on_disconnect,
     test_client_binary_sessions_and_attach_errors,
+    test_file_push_pull_roundtrip,
+    test_file_upload_is_atomic_on_failure,
+    test_file_stat_and_missing_file,
+    test_file_path_safety,
+    test_client_binary_push_pull,
     test_input_backpressure_is_bounded,
     test_output_backpressure_is_bounded,
     test_handshake_timeout,

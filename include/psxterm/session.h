@@ -113,6 +113,16 @@ typedef struct psx_session {
     /* Short description of the current foreground command ("psh" when idle). */
     char command[64];
 
+    /* At most one file transfer at a time, per session. */
+    bool file_active;
+    int file_fd;
+    uint8_t file_mode;
+    uint64_t file_offset;  /* next read/write offset */
+    uint64_t file_size;    /* declared size for writes, actual for reads */
+    uint64_t file_written; /* bytes accepted so far for writes */
+    char file_path[PSX_PATH_MAX];
+    char file_tmp[PSX_PATH_MAX];
+
     /* PipeTTY only: input was shut down to deliver EOF, so the tty must be
      * recreated before the next process is spawned. */
     bool tty_input_closed;
@@ -160,6 +170,14 @@ bool psx_session_is_detached(const psx_session_t *session);
  */
 void psx_session_scrollback_append(psx_session_t *session, const uint8_t *data,
                                    size_t len);
+
+/*
+ * Validate a transfer path received over the network and resolve it against
+ * the session cwd. Rejects empty paths, embedded NUL bytes and paths that do
+ * not fit. Returns 0 or -1 with errno set.
+ */
+int psx_file_resolve_path(const psx_session_t *session, const uint8_t *raw,
+                          size_t len, char *out, size_t out_cap);
 
 /* Queue a framed message for the client. */
 int psx_session_emit(psx_session_t *session, uint8_t type, const void *data,
