@@ -129,6 +129,20 @@ notify_send_rich(const char *message)
         return -1;
     }
 
+    {
+        /*
+         * Keep the exact payload on disk: the console's own log only reports
+         * a length, and a malformed payload is registered without being
+         * displayed (observed on hardware as an empty useCaseId).
+         */
+        FILE *dump = fopen("/data/psxterm/last-notification.json", "w");
+
+        if(dump) {
+            fwrite(payload, 1, (size_t)len, dump);
+            fclose(dump);
+        }
+    }
+
     return sceNotificationSend(0xFE, 1, payload);
 }
 
@@ -159,9 +173,18 @@ psx_platform_notify(const char *message)
 
     if(notify_send_rich(message) == 0) {
         PSX_LOGI("notify: %s", message);
-        return;
     }
 
+    /*
+     * Also post the legacy request.
+     *
+     * On the tested console the rich call succeeds - the shell logs Post7 and
+     * registers the payload - but nothing is displayed, which points at a
+     * firmware whose notification service does not render that template. The
+     * legacy request is the one the console shows natively, so it is sent
+     * unconditionally; where both work this costs one extra notification and
+     * that is visible in the log.
+     */
     memset(&req, 0, sizeof(req));
     snprintf(req.message, sizeof(req.message), "%s", message);
 
