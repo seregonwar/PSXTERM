@@ -59,6 +59,7 @@ set(PSXTERM_CORE_SOURCES
   platform/${PSXTERM_PLATFORM}/platform.c
   platform/${PSXTERM_PLATFORM}/filesystem.c
   platform/${PSXTERM_PLATFORM}/tty.c
+  platform/${PSXTERM_PLATFORM}/notify.c
   platform/${PSXTERM_PLATFORM}/process.c
 )
 
@@ -69,6 +70,14 @@ target_include_directories(psxterm_core PUBLIC
 if(PSXTERM_PLATFORM STREQUAL "host")
   find_package(Threads REQUIRED)
   target_link_libraries(psxterm_core PUBLIC Threads::Threads)
+else()
+  # Console builds link against the system libraries the payload SDK stubs
+  # out. SceNotification carries the rich notification API the daemon uses
+  # for its on-screen toasts; on PS4 it does not exist, and that build uses
+  # the legacy notification request instead.
+  if(PSXTERM_PLATFORM STREQUAL "ps5")
+    target_link_libraries(psxterm_core PUBLIC SceNotification)
+  endif()
 endif()
 
 # psxtermd: the daemon (also the payload entry point on PS4/PS5)

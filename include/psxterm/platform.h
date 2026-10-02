@@ -24,6 +24,12 @@ bool psx_privilege_raise(void);
 /* Human readable platform name, e.g. "PS5", "PS4", "Host". */
 const char *psx_platform_name(void);
 
+/*
+ * Show a system notification on the console (an on-screen toast, not a log
+ * line). No-op with a debug log where the platform has no notification API.
+ */
+void psx_platform_notify(const char *message);
+
 /* Machine form of the platform name, e.g. "ps5", "ps4", "host". */
 const char *psx_platform_id(void);
 

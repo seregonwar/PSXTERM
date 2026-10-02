@@ -799,6 +799,7 @@ psx_server_run(const psx_server_config_t *config)
                      (unsigned)config->port);
 
             if(psx_instance_replace_siblings() > 0) {
+                psx_platform_notify("PSXTERM: replaced the previous instance");
                 for(int attempt = 0; attempt < 15; attempt++) {
                     struct timespec pause = {.tv_sec = 0,
                                              .tv_nsec = 200 * 1000 * 1000};
@@ -829,6 +830,14 @@ psx_server_run(const psx_server_config_t *config)
     PSX_NOTIFY("started on port %u (%s, protocol %s, version %s)",
                (unsigned)config->port, psx_platform_name(),
                PSXTERM_PROTOCOL_NAME, PSXTERM_VERSION_STRING);
+
+    {
+        char toast[128];
+
+        snprintf(toast, sizeof(toast), "PSXTERM: started on port %u",
+                 (unsigned)config->port);
+        psx_platform_notify(toast);
+    }
 
     if(config->auth_mode == PSX_AUTH_TOKEN) {
         PSX_NOTIFY("authentication: shared token required");
@@ -1055,6 +1064,12 @@ main(int argc, char **argv)
     if(!psx_platform_init()) {
         PSX_LOGE("platform initialization failed");
         return 1;
+    }
+
+    if(!doctor) {
+        /* The console's own toast, so the operator sees the daemon start
+         * without watching a log. */
+        psx_platform_notify("PSXTERM by SeregonWar started");
     }
 
     /*
