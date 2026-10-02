@@ -748,13 +748,14 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
     options.envp = envp;
 
     /*
-     * NOTE (hardware, both configurations measured): end of input must not be
-     * signalled on the pair that also carries the process's output - after
-     * that shutdown the daemon stops receiving the payload's output even
-     * though the payload's own write(1) still reports success. A stdin pipe
-     * is the right shape for that, but with it the payload's output does not
-     * reach the daemon either, and that is not understood yet. Until then the
-     * tty is used for all three, which is the configuration verified working.
+     * NOTE (hardware, three configurations measured): the tty for all three
+     * descriptors is the configuration that works. Signalling end of input on
+     * that shared pair costs the rest of the payload's output, and a stdin
+     * pipe - even installed exactly the way the reference loader does, with
+     * the caps raised around the redirection - loses the payload's output
+     * too. The reference ecosystem only ever passes sockets here (shsrv gives
+     * its shell the client socket), so the pipe path is untested there as
+     * well; until it is understood, the verified configuration stays.
      */
     (void)session->proc.stdin_fd;
     session->proc.stdin_fd = -1;

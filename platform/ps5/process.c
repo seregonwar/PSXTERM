@@ -1029,28 +1029,28 @@ install_stdio_fd(pid_t pid, pid_t owner, int fd, int target)
     }
 
     /*
-     * Import first, dup2 second.
-     *
-     * Only the standard descriptors survive execve in the victim, so the
-     * daemon's numbers are not meaningful there any more: dup2 on such a
-     * number can "succeed" by duplicating whatever the victim happens to have
-     * at that index, which is how a payload ends up with a perfectly valid
-     * descriptor that leads nowhere. rdup imports the daemon's descriptor by
-     * number across the process boundary, which is unambiguous.
+     * Reference sequence (ps5-payload-dev shsrv, elfldr_debug): import the
+     * daemon's descriptor across the process boundary, CLOSE the target
+     * first, duplicate onto it, then drop the temporary. Leaving the target
+     * in place worked on paper but produced descriptors that accepted writes
+     * while nothing reached the other side, which is why the close is not
+     * optional here.
      */
     imported = (int)pt_rdup(pid, owner, fd);
-
-    if(imported >= 0) {
-        if(pt_dup2(pid, imported, target) == target) {
-            return 0;
-        }
+    if(imported < 0) {
+        return -1;
     }
 
-    if(pt_dup2(pid, fd, target) == target) {
-        return 0;
+    (void)pt_close(pid, target);
+
+    if(pt_dup2(pid, imported, target) != target) {
+        (void)pt_close(pid, imported);
+        return -1;
     }
 
-    return -1;
+    (void)pt_close(pid, imported);
+
+    return 0;
 }
 
 /*
@@ -1066,7 +1066,22 @@ static int
 dup_stdio(pid_t pid, pid_t owner, const psx_spawn_options_t *options,
           psx_spawn_failure_t *failure)
 {
+    uint8_t privcaps[16];
+    uint8_t orgcaps[16];
+    bool caps_raised = false;
     int failures = 0;
+
+    /*
+     * The reference loader raises the victim's capabilities around the
+     * redirection and restores them afterwards; without it the duplicates can
+     * behave differently from the descriptor they came from.
+     */
+    memset(privcaps, 0xff, sizeof(privcaps));
+
+    if(kernel_get_ucred_caps(pid, orgcaps) == 0 &&
+       kernel_set_ucred_caps(pid, privcaps) == 0) {
+        caps_raised = true;
+    }
 
     if(install_stdio_fd(pid, owner, options->stdin_fd, STDIN_FILENO) != 0) {
         failures++;
@@ -1081,6 +1096,10 @@ dup_stdio(pid_t pid, pid_t owner, const psx_spawn_options_t *options,
     if(install_stdio_fd(pid, owner, options->stderr_fd, STDERR_FILENO) != 0) {
         failures++;
         PSX_LOGW("ps5: stderr could not be installed in the victim");
+    }
+
+    if(caps_raised) {
+        (void)kernel_set_ucred_caps(pid, orgcaps);
     }
 
     if(failures != 0) {
