@@ -25,8 +25,9 @@ HEADER_SIZE = 16
 MAX_PAYLOAD = 65536
 
 (HELLO, HELLO_ACK, OPEN, OPEN_OK, CLOSE, STDIN, STDOUT, STDERR, RESIZE, SIGNAL,
- EXEC, EXIT, PING, PONG, DIAG_REQUEST, DIAG_DATA, DIAG_DONE,
- CAPS) = range(1, 19)
+ EXEC, EXIT, PING, PONG, DIAG_REQUEST, DIAG_DATA, DIAG_DONE, CAPS, DETACH,
+ ATTACH, ATTACH_OK, ATTACH_FAIL, SESSION_INFO, SESSIONS_REQUEST, SESSIONS_DATA,
+ SESSIONS_DONE) = range(1, 27)
 
 (CAP_REAL_PTY, CAP_PIPE_TTY, CAP_EXEC, CAP_FILE_TRANSFER, CAP_SESSION_RESUME,
  CAP_JOB_CONTROL, CAP_AUTH_CHALLENGE, CAP_COMPRESSION,
@@ -125,6 +126,9 @@ class Client:
         self.sock.settimeout(timeout)
         self.buffer = b""
         self.session_id = 0
+        self.caps = 0
+        self.resume_token = None
+        self.info_session_id = None
         self.closed = False
 
         self.send(HELLO, self.encode_hello(name, token))
@@ -156,6 +160,47 @@ class Client:
 
     def send_raw(self, data):
         self.sock.sendall(data)
+
+    def detach(self):
+        """Detaches without closing the session, then drops the connection."""
+        self.send(DETACH)
+        self.sock.close()
+
+    def attach(self, session_id, token):
+        """Attaches to a detached session; returns (ok, reason, truncated)."""
+        payload = struct.pack("<I", session_id) + bytes(token)
+        self.send(ATTACH, payload)
+
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            header, data = self.read_frame(
+                timeout=max(0.1, deadline - time.time()))
+
+            if header[0] == ATTACH_OK:
+                self.session_id = session_id
+                return True, None, bool(data[4]) if len(data) >= 5 else False
+            if header[0] == ATTACH_FAIL:
+                return False, (data[0] if data else None), False
+            if header[0] == CLOSE:
+                return False, None, False
+
+        return False, None, False
+
+    def sessions_listing(self, timeout=5.0):
+        """Returns the daemon's session listing as text."""
+        self.send(SESSIONS_REQUEST)
+        chunks = []
+        deadline = time.time() + timeout
+
+        while time.time() < deadline:
+            header, payload = self.read_frame(
+                timeout=max(0.1, deadline - time.time()))
+            if header[0] == SESSIONS_DATA:
+                chunks.append(payload.decode(errors="replace"))
+            elif header[0] == SESSIONS_DONE:
+                return "".join(chunks)
+
+        raise ProtocolError("no SESSIONS_DONE received")
 
     def read_caps(self, timeout=3.0):
         """Reads frames until the capability advertisement arrives."""
@@ -196,6 +241,14 @@ class Client:
 
             payload = self.buffer[HEADER_SIZE:HEADER_SIZE + length]
             self.buffer = self.buffer[HEADER_SIZE + length:]
+
+            # Capture session metadata wherever a frame is read.
+            if msg_type == CAPS and len(payload) >= 4:
+                self.caps = struct.unpack("<I", payload[:4])[0]
+            elif msg_type == SESSION_INFO and len(payload) >= 20:
+                self.info_session_id = struct.unpack("<I", payload[:4])[0]
+                self.resume_token = payload[4:20]
+
             return (msg_type, flags, session_id, length), payload
         finally:
             if timeout is not None:
@@ -235,11 +288,17 @@ class Client:
 
     # -- convenience -----------------------------------------------------
 
-    def drain(self, quiet=0.3, collect=True):
-        """Read frames until the socket has been quiet for `quiet` seconds."""
+    def drain(self, quiet=0.3, max_total=5.0):
+        """Read frames until the socket has been quiet for `quiet` seconds.
+
+        `max_total` bounds the read even while data keeps arriving, so a
+        flooding remote process cannot hang a test.
+        """
         out = []
-        deadline = time.time() + quiet
-        while time.time() < deadline:
+        start = time.time()
+        deadline = start + quiet
+
+        while time.time() < deadline and time.time() - start < max_total:
             self.sock.settimeout(max(0.01, deadline - time.time()))
             try:
                 header, payload = self.read_frame()
@@ -248,7 +307,8 @@ class Client:
             except ProtocolError:
                 break
             out.append((header, payload))
-            deadline = time.time() + quiet
+            deadline = min(time.time() + quiet, start + max_total)
+
         self.sock.settimeout(5.0)
         return out
 
@@ -850,6 +910,168 @@ def test_output_backpressure_is_bounded():
         other.close()
 
 
+def test_detach_attach_roundtrip():
+    with Daemon() as daemon:
+        a = Client(daemon)
+        a.drain()
+
+        check(a.resume_token is not None, "no resume token delivered")
+        session_id = a.session_id
+        token = a.resume_token
+
+        text, status, _ = a.execute("pwd")
+        check(status == 0, "pwd failed before detach")
+        a.execute("cd /")
+
+        a.detach()
+        time.sleep(0.3)
+
+        # Attach connections must not OPEN a session first.
+        b = Client(daemon, open_session=False)
+        check(b.session_id != session_id,
+              "attach must not reuse the requester's session id")
+        ok, reason, _ = b.attach(session_id, token)
+        check(ok, "attach failed (reason %r)" % reason)
+
+        b.drain(quiet=0.4)
+        text, status, _ = b.execute("pwd")
+        check(status == 0, "reattached session cannot run commands")
+        check("\n/\n" in text or text.strip().endswith("/"),
+              "session cwd not preserved across detach: %r" % text)
+
+        check(b.caps & CAP_SESSION_RESUME, "SESSION_RESUME not advertised")
+        b.close()
+
+
+def test_attach_rejects_bad_token_and_unknown_session():
+    with Daemon() as daemon:
+        a = Client(daemon)
+        a.drain()
+        a.detach()
+        time.sleep(0.3)
+
+        bad = Client(daemon, open_session=False)
+        ok, reason, _ = bad.attach(a.session_id, b"\x00" * 16)
+        check(not ok, "attach with a bad token was accepted")
+        check(reason == 1, "expected BAD_TOKEN, got %r" % reason)
+
+        unknown = Client(daemon, open_session=False)
+        ok, reason, _ = unknown.attach(999999, a.resume_token)
+        check(not ok, "attach to an unknown session was accepted")
+        check(reason == 0, "expected UNKNOWN_SESSION, got %r" % reason)
+
+        good = Client(daemon, open_session=False)
+        ok, reason, _ = good.attach(a.session_id, a.resume_token)
+        check(ok, "valid attach rejected: %r" % reason)
+        good.close()
+
+
+def test_scrollback_delivered_after_detach():
+    with Daemon() as daemon:
+        a = Client(daemon)
+        a.drain()
+
+        # Output produced while nobody is attached.
+        a.send(EXEC, b'/bin/sh -c "sleep 1; echo BUFFERED-OUTPUT"')
+        time.sleep(0.2)
+        a.detach()
+        time.sleep(1.6)
+
+        b = Client(daemon, open_session=False)
+        ok, reason, _ = b.attach(a.session_id, a.resume_token)
+        check(ok, "attach failed: %r" % reason)
+
+        frames = b.drain(quiet=0.6)
+        text = b.text_of(frames)
+        check("BUFFERED-OUTPUT" in text, "scrollback lost: %r" % text)
+        b.close()
+
+
+def test_scrollback_truncation_notice():
+    with Daemon() as daemon:
+        a = Client(daemon)
+        a.drain()
+
+        a.send(EXEC, b"/usr/bin/yes")
+        time.sleep(0.3)
+        a.detach()
+        time.sleep(1.6)  # yes floods the bounded scrollback
+
+        b = Client(daemon, open_session=False)
+        ok, reason, truncated = b.attach(a.session_id, a.resume_token)
+        check(ok, "attach failed: %r" % reason)
+        check(truncated, "daemon did not report scrollback truncation")
+
+        frames = b.drain(quiet=0.6)
+        text = b.text_of(frames)
+        check("output truncated while detached" in text,
+              "missing truncation notice: %r" % text[:200])
+        b.close()
+
+
+def test_sessions_listing_reports_detached():
+    with Daemon() as daemon:
+        a = Client(daemon)
+        a.drain()
+        a.detach()
+        time.sleep(0.3)
+
+        b = Client(daemon)
+        b.drain()
+        listing = b.sessions_listing()
+
+        check("ID" in listing and "STATE" in listing,
+              "listing header missing: %r" % listing)
+        check("detached" in listing, "no detached session listed: %r" % listing)
+        check(str(a.session_id) in listing, "detached id missing from listing")
+        check("running" in listing, "requester session not listed")
+        check("psh" in listing, "command column missing")
+        b.close()
+
+
+def test_no_persist_destroys_session_on_disconnect():
+    with Daemon("--no-persist") as daemon:
+        a = Client(daemon)
+        a.drain()
+        session_id = a.session_id
+        a.detach()
+        time.sleep(0.4)
+
+        b = Client(daemon)
+        b.drain()
+        listing = b.sessions_listing()
+        check(str(session_id) not in listing,
+              "session survived a disconnect with --no-persist: %r" % listing)
+        b.close()
+
+
+def test_client_binary_sessions_and_attach_errors():
+    with Daemon() as daemon:
+        psxterm = os.path.join(BUILD, "psxterm")
+
+        listing = subprocess.run(
+            [psxterm, "sessions", "127.0.0.1", "-p", str(daemon.port)],
+            capture_output=True, text=True, timeout=30)
+        check(listing.returncode == 0,
+              "sessions rc=%d stderr=%s" % (listing.returncode, listing.stderr))
+        check("STATE" in listing.stdout and "COMMAND" in listing.stdout,
+              "sessions output unexpected: %r" % listing.stdout)
+
+        bad = subprocess.run(
+            [psxterm, "attach", "127.0.0.1", "999999", "--resume", "00" * 16,
+             "-p", str(daemon.port)],
+            capture_output=True, text=True, timeout=30)
+        check(bad.returncode == 2, "attach rc=%d" % bad.returncode)
+        check("unknown session" in bad.stderr,
+              "attach error message: %r" % bad.stderr)
+
+        missing = subprocess.run(
+            [psxterm, "attach", "127.0.0.1", "1", "-p", str(daemon.port)],
+            capture_output=True, text=True, timeout=30)
+        check(missing.returncode == 64,
+              "missing --resume rc=%d" % missing.returncode)
+
+
 def test_handshake_timeout():
     with Daemon("--handshake-timeout", "300") as daemon:
         sock = socket.create_connection(("127.0.0.1", daemon.port), 3.0)
@@ -924,6 +1146,13 @@ TESTS = [
     test_doctor_client_binary,
     test_capabilities_advertised,
     test_capabilities_pipe_backend,
+    test_detach_attach_roundtrip,
+    test_attach_rejects_bad_token_and_unknown_session,
+    test_scrollback_delivered_after_detach,
+    test_scrollback_truncation_notice,
+    test_sessions_listing_reports_detached,
+    test_no_persist_destroys_session_on_disconnect,
+    test_client_binary_sessions_and_attach_errors,
     test_input_backpressure_is_bounded,
     test_output_backpressure_is_bounded,
     test_handshake_timeout,

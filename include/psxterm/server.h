@@ -22,6 +22,14 @@ typedef struct {
     int handshake_timeout_ms;
     int idle_timeout_ms; /* 0 disables the idle timeout */
 
+    /*
+     * Session persistence: a dropped connection detaches the session instead
+     * of destroying it. Detached sessions are reclaimed after
+     * detached_timeout_ms (0 disables the reclamation).
+     */
+    bool persist_sessions;
+    int detached_timeout_ms;
+
     bool dev_insecure; /* set when authentication is disabled on purpose */
 } psx_server_config_t;
 

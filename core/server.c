@@ -61,6 +61,8 @@ psx_server_config_default(psx_server_config_t *config)
     config->auth_mode = PSX_AUTH_NONE;
     config->handshake_timeout_ms = SERVER_DEFAULT_HANDSHAKE_MS;
     config->idle_timeout_ms = 0;
+    config->persist_sessions = true;
+    config->detached_timeout_ms = 30 * 60 * 1000;
 }
 
 /* --- handshake ---------------------------------------------------------- */
@@ -170,6 +172,26 @@ handshake_open(psx_server_t *server, psx_session_t *session,
         return -1;
     }
 
+    /*
+     * Hand the creating client the resume token over the authenticated
+     * connection. The token is a secret: it is never written to the daemon
+     * log, and the client only prints it when the user detaches.
+     */
+    {
+        uint8_t info[4 + PTTY_RESUME_TOKEN_SIZE];
+
+        info[0] = (uint8_t)(id & 0xff);
+        info[1] = (uint8_t)((id >> 8) & 0xff);
+        info[2] = (uint8_t)((id >> 16) & 0xff);
+        info[3] = (uint8_t)((id >> 24) & 0xff);
+        memcpy(info + 4, session->resume_token, PTTY_RESUME_TOKEN_SIZE);
+
+        if(psx_session_emit(session, PTTY_MSG_SESSION_INFO, info,
+                            sizeof(info)) < 0) {
+            return -1;
+        }
+    }
+
     if(psx_session_begin(session) < 0) {
         PSX_LOGE("session %u: failed to start: %s", session->id,
                  strerror(errno));
@@ -178,6 +200,10 @@ handshake_open(psx_server_t *server, psx_session_t *session,
 
     return 0;
 }
+
+static int
+handshake_attach(psx_server_t *server, psx_session_t *session,
+                 const ptty_header_t *header, const uint8_t *payload);
 
 static int
 server_handshake_frame(psx_server_t *server, psx_session_t *session,
@@ -190,20 +216,105 @@ server_handshake_frame(psx_server_t *server, psx_session_t *session,
     case PTTY_MSG_OPEN:
         return handshake_open(server, session, header, payload);
 
+    case PTTY_MSG_ATTACH:
+        return handshake_attach(server, session, header, payload);
+
     case PTTY_MSG_PING:
         return psx_session_emit(session, PTTY_MSG_PONG, payload,
                                 header->payload_length) < 0
-                   ? -1
-                   : 0;
+                   ? PSX_SESSION_FRAME_ERROR
+                   : PSX_SESSION_FRAME_CONTINUE;
 
     case PTTY_MSG_CLOSE:
-        return -1;
+        return PSX_SESSION_FRAME_ERROR;
 
     default:
         PSX_LOGW("session %u: unexpected %s frame during handshake",
                  session->id, ptty_msg_name(header->type));
-        return -1;
+        return PSX_SESSION_FRAME_ERROR;
     }
+}
+
+static uint32_t
+read_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static void
+send_attach_fail(int fd, uint8_t reason, uint32_t session_id)
+{
+    ptty_send_simple(fd, PTTY_MSG_ATTACH_FAIL, 0, session_id, &reason, 1);
+}
+
+/*
+ * Resume a detached session on this connection. The handshaking session is a
+ * placeholder: once the token checks out, the socket is handed to the target
+ * session and the placeholder is removed without touching the socket.
+ */
+static int
+handshake_attach(psx_server_t *server, psx_session_t *session,
+                 const ptty_header_t *header, const uint8_t *payload)
+{
+    psx_session_t *target;
+    uint32_t id;
+    int fd;
+
+    if(header->payload_length != PTTY_ATTACH_PAYLOAD_SIZE) {
+        send_attach_fail(session->sock_fd, PTTY_ATTACH_UNKNOWN_SESSION, 0);
+        return PSX_SESSION_FRAME_ERROR;
+    }
+
+    id = read_le32(payload);
+    target = psx_session_manager_find(&server->sessions, id);
+
+    if(!target || target == session) {
+        send_attach_fail(session->sock_fd, PTTY_ATTACH_UNKNOWN_SESSION, id);
+        return PSX_SESSION_FRAME_ERROR;
+    }
+
+    if(!psx_session_is_detached(target)) {
+        send_attach_fail(session->sock_fd, PTTY_ATTACH_NOT_DETACHED, id);
+        return PSX_SESSION_FRAME_ERROR;
+    }
+
+    if(!psx_session_check_token(target, payload + 4, PTTY_RESUME_TOKEN_SIZE)) {
+        PSX_LOGW("session %u: attach to session %u rejected (bad token)",
+                 session->id, id);
+        send_attach_fail(session->sock_fd, PTTY_ATTACH_BAD_TOKEN, id);
+        return PSX_SESSION_FRAME_ERROR;
+    }
+
+    {
+        uint8_t ok[5];
+
+        ok[0] = (uint8_t)(id & 0xff);
+        ok[1] = (uint8_t)((id >> 8) & 0xff);
+        ok[2] = (uint8_t)((id >> 16) & 0xff);
+        ok[3] = (uint8_t)((id >> 24) & 0xff);
+        ok[4] = target->scrollback_truncated ? 1 : 0;
+
+        if(ptty_send_simple(session->sock_fd, PTTY_MSG_ATTACH_OK, 0, id, ok,
+                            sizeof(ok)) < 0) {
+            return PSX_SESSION_FRAME_ERROR;
+        }
+    }
+
+    fd = session->sock_fd;
+    session->sock_fd = -1;
+    session->state = PSX_SESSION_CLOSED;
+
+    if(psx_session_attach(target, fd) < 0) {
+        PSX_LOGE("session %u: cannot attach: %s", id, strerror(errno));
+        close(fd);
+        return PSX_SESSION_FRAME_ERROR;
+    }
+
+    PSX_LOGI("session %u: client '%s' attached", target->id,
+             target->client_name[0] ? target->client_name : "unknown");
+
+    return PSX_SESSION_FRAME_REPLACED;
 }
 
 /* --- session event handling --------------------------------------------- */
@@ -224,17 +335,17 @@ server_session_readable(psx_server_t *server, psx_session_t *session)
         }
         if(rc == PTTY_READ_EOF) {
             PSX_LOGD("session %u: client disconnected", session->id);
-            return -1;
+            return PSX_SESSION_FRAME_DETACH;
         }
         if(rc == PTTY_READ_ERROR) {
             PSX_LOGW("session %u: socket read: %s", session->id,
                      strerror(errno));
-            return -1;
+            return PSX_SESSION_FRAME_DETACH;
         }
         if(rc == PTTY_READ_PROTOCOL) {
             session->protocol_errors++;
             PSX_LOGW("session %u: protocol error", session->id);
-            return -1;
+            return PSX_SESSION_FRAME_ERROR;
         }
 
         session->frames_in++;
@@ -337,13 +448,29 @@ server_tick(psx_server_t *server)
     for(session = server->sessions.sessions; session; session = next) {
         next = session->next;
 
+        /* Placeholder sessions left over from a successful attach. */
+        if(session->state == PSX_SESSION_CLOSED) {
+            server_session_remove(server, session, "closed");
+            continue;
+        }
+
         /* Finished foreground processes. */
         psx_session_check_process(session);
 
-        /* Shell requested exit. */
-        if(session->state == PSX_SESSION_RUNNING && session->shell &&
-           psh_shell_exit_requested(session->shell)) {
+        /* Shell requested exit (attached or detached). */
+        if((session->state == PSX_SESSION_RUNNING ||
+            session->state == PSX_SESSION_DETACHED) &&
+           session->shell && psh_shell_exit_requested(session->shell)) {
             server_session_start_closing(session);
+        }
+
+        /* Unclaimed detached session: reclaim it after the timeout. */
+        if(session->state == PSX_SESSION_DETACHED &&
+           server->config->detached_timeout_ms > 0 &&
+           now - session->detached_since_ms >
+               (uint64_t)server->config->detached_timeout_ms) {
+            server_session_remove(server, session, "detached timeout");
+            continue;
         }
 
         /* Closing: flush pending output, then drop. */
@@ -417,19 +544,27 @@ server_loop(psx_server_t *server)
                 continue;
             }
 
-            server->pfds[n].fd = s->sock_fd;
-            server->pfds[n].events = 0;
-            /* Backpressure: stop reading while the tty input queue is full. */
-            if(psx_buf_pending(&s->in) < PSX_SESSION_IN_HIGH_WATER) {
-                server->pfds[n].events |= POLLIN;
+            if(s->sock_fd >= 0) {
+                server->pfds[n].fd = s->sock_fd;
+                server->pfds[n].events = 0;
+                /* Backpressure: stop reading while the tty input queue is
+                 * full. */
+                if(psx_buf_pending(&s->in) < PSX_SESSION_IN_HIGH_WATER) {
+                    server->pfds[n].events |= POLLIN;
+                }
+                if(psx_buf_pending(&s->out) > 0) {
+                    server->pfds[n].events |= POLLOUT;
+                }
+                server->owners[n] = s->id;
+                n++;
             }
-            if(psx_buf_pending(&s->out) > 0) {
-                server->pfds[n].events |= POLLOUT;
-            }
-            server->owners[n] = s->id;
-            n++;
 
-            if(s->tty.master_fd >= 0 && s->state == PSX_SESSION_RUNNING) {
+            /* Detached sessions keep draining their tty into the bounded
+             * scrollback so a foreground process is never blocked by a
+             * missing client. */
+            if(s->tty.master_fd >= 0 &&
+               (s->state == PSX_SESSION_RUNNING ||
+                s->state == PSX_SESSION_DETACHED)) {
                 server->pfds[n].fd = s->tty.master_fd;
                 server->pfds[n].events = POLLIN;
                 if(psx_buf_pending(&s->in) > 0) {
@@ -454,7 +589,6 @@ server_loop(psx_server_t *server)
             for(size_t i = 0; i < n; i++) {
                 short revents = server->pfds[i].revents;
                 psx_session_t *session;
-                bool is_tty;
 
                 if(revents == 0) {
                     continue;
@@ -487,10 +621,8 @@ server_loop(psx_server_t *server)
                     continue;
                 }
 
-                is_tty = session->tty.master_fd >= 0 &&
-                         server->pfds[i].fd == session->tty.master_fd;
-
-                if(is_tty) {
+                if(session->tty.master_fd >= 0 &&
+                   server->pfds[i].fd == session->tty.master_fd) {
                     if(revents & (POLLIN | POLLHUP | POLLERR)) {
                         if(psx_session_on_tty_readable(session) < 0) {
                             server_handle_error(server, session, "tty error");
@@ -503,25 +635,47 @@ server_loop(psx_server_t *server)
                             continue;
                         }
                     }
-                } else {
-                    if(revents & (POLLIN | POLLHUP | POLLERR)) {
-                        int rc = server_session_readable(server, session);
+                    continue;
+                }
 
-                        if(rc < 0) {
-                            server_handle_error(server, session,
-                                                "client disconnected");
-                            continue;
-                        }
-                        if(rc > 0) {
-                            server_session_start_closing(session);
-                            continue;
-                        }
+                /* Stale entry: the session detached or was replaced. */
+                if(session->sock_fd < 0 ||
+                   server->pfds[i].fd != session->sock_fd) {
+                    continue;
+                }
+
+                if(revents & (POLLIN | POLLHUP | POLLERR)) {
+                    int rc = server_session_readable(server, session);
+
+                    if(rc == PSX_SESSION_FRAME_ERROR) {
+                        server_handle_error(server, session, "protocol error");
+                        continue;
                     }
-                    if(revents & POLLOUT) {
-                        if(psx_session_flush(session) < 0) {
-                            server_handle_error(server, session, "socket error");
-                            continue;
+                    if(rc == PSX_SESSION_FRAME_CLOSE) {
+                        server_session_start_closing(session);
+                        continue;
+                    }
+                    if(rc == PSX_SESSION_FRAME_REPLACED) {
+                        server_session_remove(server, session,
+                                              "replaced by attach");
+                        continue;
+                    }
+                    if(rc == PSX_SESSION_FRAME_DETACH) {
+                        if(server->config->persist_sessions &&
+                           session->state == PSX_SESSION_RUNNING) {
+                            psx_session_detach(session);
+                        } else {
+                            server_session_remove(server, session,
+                                                  "client disconnected");
                         }
+                        continue;
+                    }
+                }
+
+                if(revents & POLLOUT) {
+                    if(psx_session_flush(session) < 0) {
+                        server_handle_error(server, session, "socket error");
+                        continue;
                     }
                 }
             }
@@ -674,6 +828,10 @@ usage(const char *argv0)
     printf("      --handshake-timeout MS  handshake deadline (default %d)\n",
            SERVER_DEFAULT_HANDSHAKE_MS);
     printf("      --idle-timeout MS    drop idle sessions (default off)\n");
+    printf("      --no-persist         destroy sessions on disconnect\n");
+    printf("      --detached-timeout MS  reclaim detached sessions "
+           "(default %d)\n",
+           30 * 60 * 1000);
     printf("      --tty MODE           auto|pty|pipe (default auto)\n");
     printf("      --doctor             run local diagnostics and exit\n");
     printf("      --json               machine-readable diagnostics output\n");
@@ -734,6 +892,16 @@ parse_args(int argc, char **argv, psx_server_config_t *config, bool *doctor,
                 return -1;
             }
             config->idle_timeout_ms = value;
+        } else if(strcmp(arg, "--no-persist") == 0) {
+            config->persist_sessions = false;
+        } else if(strcmp(arg, "--detached-timeout") == 0) {
+            int value;
+
+            if(++i >= argc || !psx_parse_int(argv[i], &value) || value < 0) {
+                PSX_LOGE("invalid detached timeout");
+                return -1;
+            }
+            config->detached_timeout_ms = value;
         } else if(strcmp(arg, "--tty") == 0) {
             if(++i >= argc) {
                 return -1;

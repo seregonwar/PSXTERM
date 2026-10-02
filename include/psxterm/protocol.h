@@ -62,11 +62,41 @@ typedef enum {
      * older daemon simply never receive it and must assume the baseline
      * PTTY/1 feature set instead of guessing from version strings.
      */
-    PTTY_MSG_CAPS = 18
+    PTTY_MSG_CAPS = 18,
+    /*
+     * Session persistence: DETACH keeps a session alive across a dropped
+     * connection, ATTACH resumes it with the session's resume token.
+     */
+    PTTY_MSG_DETACH = 19,
+    PTTY_MSG_ATTACH = 20,
+    PTTY_MSG_ATTACH_OK = 21,
+    PTTY_MSG_ATTACH_FAIL = 22,
+    /*
+     * SESSION_INFO is sent once to the client that created a session:
+     * u32 session id || PTTY_RESUME_TOKEN_SIZE random bytes. The token is a
+     * secret; the daemon never writes it to its log.
+     */
+    PTTY_MSG_SESSION_INFO = 23,
+    PTTY_MSG_SESSIONS_REQUEST = 24,
+    PTTY_MSG_SESSIONS_DATA = 25,
+    PTTY_MSG_SESSIONS_DONE = 26
 } ptty_msg_type_t;
 
 /* DIAG_REQUEST flags */
 #define PTTY_DIAG_FLAG_JSON 0x01u
+
+#define PTTY_RESUME_TOKEN_SIZE 16
+
+/* ATTACH payload: u32 session id || PTTY_RESUME_TOKEN_SIZE bytes. */
+#define PTTY_ATTACH_PAYLOAD_SIZE (4 + PTTY_RESUME_TOKEN_SIZE)
+
+/* ATTACH_FAIL reason byte. */
+enum {
+    PTTY_ATTACH_UNKNOWN_SESSION = 0,
+    PTTY_ATTACH_BAD_TOKEN = 1,
+    PTTY_ATTACH_NOT_DETACHED = 2,
+    PTTY_ATTACH_LIMIT = 3
+};
 
 /*
  * Capability bitmask carried by PTTY_MSG_CAPS as a little-endian uint32.

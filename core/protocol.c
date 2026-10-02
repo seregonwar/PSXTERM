@@ -394,6 +394,14 @@ ptty_msg_name(uint8_t type)
     case PTTY_MSG_DIAG_DATA: return "DIAG_DATA";
     case PTTY_MSG_DIAG_DONE: return "DIAG_DONE";
     case PTTY_MSG_CAPS: return "CAPS";
+    case PTTY_MSG_DETACH: return "DETACH";
+    case PTTY_MSG_ATTACH: return "ATTACH";
+    case PTTY_MSG_ATTACH_OK: return "ATTACH_OK";
+    case PTTY_MSG_ATTACH_FAIL: return "ATTACH_FAIL";
+    case PTTY_MSG_SESSION_INFO: return "SESSION_INFO";
+    case PTTY_MSG_SESSIONS_REQUEST: return "SESSIONS_REQUEST";
+    case PTTY_MSG_SESSIONS_DATA: return "SESSIONS_DATA";
+    case PTTY_MSG_SESSIONS_DONE: return "SESSIONS_DONE";
     default: return "UNKNOWN";
     }
 }

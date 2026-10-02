@@ -44,6 +44,20 @@ psx_session_create(uint32_t id, int sock_fd)
     psx_buf_init(&session->in);
     ptty_reader_init(&session->reader, sock_fd);
 
+    snprintf(session->command, sizeof(session->command), "%s", "psh");
+
+    if(psx_platform_random_bytes(session->resume_token,
+                                 sizeof(session->resume_token)) < 0) {
+        /* Falls back to a time/PID mix: still unpredictable enough to avoid
+         * a predictable token, and never logged either way. */
+        uint64_t seed = psx_now_ms() ^ ((uint64_t)getpid() << 32);
+
+        for(size_t i = 0; i < sizeof(session->resume_token); i++) {
+            seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+            session->resume_token[i] = (uint8_t)(seed >> 33);
+        }
+    }
+
     return session;
 }
 
@@ -76,6 +90,7 @@ psx_session_destroy(psx_session_t *session)
     psx_buf_free(&session->out);
     psx_buf_free(&session->in);
     psx_env_clear(&session->env);
+    free(session->scrollback);
 
     if(session->sock_fd >= 0) {
         close(session->sock_fd);
@@ -89,6 +104,18 @@ int
 psx_session_emit(psx_session_t *session, uint8_t type, const void *data, size_t len)
 {
     size_t offset = 0;
+
+    /*
+     * A detached session has no socket: terminal output goes into the bounded
+     * scrollback instead of a per-client queue. Control frames (EXIT/CLOSE/
+     * CAPS/...) have no client to reach and are dropped.
+     */
+    if(session->sock_fd < 0) {
+        if((type == PTTY_MSG_STDOUT || type == PTTY_MSG_STDERR) && data) {
+            psx_session_scrollback_append(session, data, len);
+        }
+        return 0;
+    }
 
     if(psx_buf_pending(&session->out) > PSX_SESSION_OUT_MAX) {
         errno = ENOBUFS;
@@ -188,10 +215,197 @@ psx_session_state_name(psx_session_state_t state)
     case PSX_SESSION_ACCEPTED: return "accepted";
     case PSX_SESSION_HANDSHAKING: return "handshake";
     case PSX_SESSION_RUNNING: return "running";
+    case PSX_SESSION_DETACHED: return "detached";
     case PSX_SESSION_CLOSING: return "closing";
     case PSX_SESSION_CLOSED: return "closed";
     default: return "unknown";
     }
+}
+
+/* --- session persistence ------------------------------------------------ */
+
+void
+psx_session_scrollback_append(psx_session_t *session, const uint8_t *data,
+                              size_t len)
+{
+    size_t tail;
+    size_t first;
+
+    if(len == 0) {
+        return;
+    }
+
+    if(!session->scrollback) {
+        if(!(session->scrollback = malloc(PSX_SESSION_SCROLLBACK_MAX))) {
+            return;
+        }
+        session->scrollback_cap = PSX_SESSION_SCROLLBACK_MAX;
+        session->scrollback_len = 0;
+        session->scrollback_start = 0;
+    }
+
+    if(len >= session->scrollback_cap) {
+        /* Keep only the newest bytes. */
+        memcpy(session->scrollback, data + (len - session->scrollback_cap),
+               session->scrollback_cap);
+        session->scrollback_start = 0;
+        session->scrollback_len = session->scrollback_cap;
+        session->scrollback_truncated = true;
+        return;
+    }
+
+    if(session->scrollback_len + len > session->scrollback_cap) {
+        size_t drop = session->scrollback_len + len - session->scrollback_cap;
+
+        session->scrollback_start =
+            (session->scrollback_start + drop) % session->scrollback_cap;
+        session->scrollback_len -= drop;
+        session->scrollback_truncated = true;
+    }
+
+    tail = (session->scrollback_start + session->scrollback_len) %
+           session->scrollback_cap;
+    first = session->scrollback_cap - tail;
+    if(first > len) {
+        first = len;
+    }
+
+    memcpy(session->scrollback + tail, data, first);
+    if(len > first) {
+        memcpy(session->scrollback, data + first, len - first);
+    }
+
+    session->scrollback_len += len;
+}
+
+static void
+session_flush_scrollback(psx_session_t *session)
+{
+    if(session->scrollback_truncated) {
+        static const char notice[] =
+            "[PSXTerm: output truncated while detached]\r\n";
+
+        psx_session_emit(session, PTTY_MSG_STDOUT, notice,
+                         sizeof(notice) - 1);
+        session->scrollback_truncated = false;
+    }
+
+    if(!session->scrollback || session->scrollback_len == 0) {
+        return;
+    }
+
+    {
+        size_t first = session->scrollback_cap - session->scrollback_start;
+
+        if(first > session->scrollback_len) {
+            first = session->scrollback_len;
+        }
+
+        psx_session_emit(session, PTTY_MSG_STDOUT,
+                         session->scrollback + session->scrollback_start,
+                         first);
+
+        if(session->scrollback_len > first) {
+            psx_session_emit(session, PTTY_MSG_STDOUT, session->scrollback,
+                             session->scrollback_len - first);
+        }
+    }
+
+    session->scrollback_len = 0;
+    session->scrollback_start = 0;
+}
+
+bool
+psx_session_check_token(const psx_session_t *session, const uint8_t *token,
+                        size_t len)
+{
+    unsigned diff = len != sizeof(session->resume_token);
+
+    for(size_t i = 0; i < len && i < sizeof(session->resume_token); i++) {
+        diff |= (unsigned)(session->resume_token[i] ^ token[i]);
+    }
+
+    return diff == 0;
+}
+
+bool
+psx_session_is_detached(const psx_session_t *session)
+{
+    return session->state == PSX_SESSION_DETACHED;
+}
+
+void
+psx_session_detach(psx_session_t *session)
+{
+    if(session->state != PSX_SESSION_RUNNING) {
+        return;
+    }
+
+    /* Output queued for the departed client is lost; say so honestly. */
+    if(psx_buf_pending(&session->out) > 0) {
+        session->scrollback_truncated = true;
+    }
+    psx_buf_free(&session->out);
+    psx_buf_init(&session->out);
+
+    if(session->sock_fd >= 0) {
+        close(session->sock_fd);
+        session->sock_fd = -1;
+    }
+
+    ptty_reader_destroy(&session->reader);
+    ptty_reader_init(&session->reader, -1);
+
+    session->state = PSX_SESSION_DETACHED;
+    session->detached_since_ms = psx_now_ms();
+
+    PSX_LOGI("session %u detached (idle for reattach, no token logged)",
+             session->id);
+}
+
+int
+psx_session_attach(psx_session_t *session, int sock_fd)
+{
+    if(session->state != PSX_SESSION_DETACHED) {
+        errno = EBUSY;
+        return -1;
+    }
+
+    psx_set_cloexec(sock_fd, true);
+    psx_set_nonblocking(sock_fd, true);
+
+    session->sock_fd = sock_fd;
+    ptty_reader_destroy(&session->reader);
+    ptty_reader_init(&session->reader, sock_fd);
+
+    session->state = PSX_SESSION_RUNNING;
+    session->last_activity_ms = psx_now_ms();
+    session->frames_in = 0;
+    session->frames_out = 0;
+    session->protocol_errors = 0;
+
+    /* Refresh the capability advertisement for the new connection. */
+    session->capabilities = psx_session_capabilities(session);
+    {
+        uint8_t payload[4] = {
+            (uint8_t)(session->capabilities & 0xff),
+            (uint8_t)((session->capabilities >> 8) & 0xff),
+            (uint8_t)((session->capabilities >> 16) & 0xff),
+            (uint8_t)((session->capabilities >> 24) & 0xff),
+        };
+
+        psx_session_emit(session, PTTY_MSG_CAPS, payload, sizeof(payload));
+    }
+
+    session_flush_scrollback(session);
+
+    if(session->shell && !session->proc.running) {
+        psh_shell_prompt(session->shell);
+    }
+
+    PSX_LOGI("session %u reattached", session->id);
+
+    return 0;
 }
 
 /* --- path handling ------------------------------------------------------ */
@@ -383,6 +597,9 @@ psx_session_capabilities(const psx_session_t *session)
 
     caps |= PTTY_CAP_JSON_DIAGNOSTICS;
 
+    /* Persistence is part of this build: sessions survive disconnects. */
+    caps |= PTTY_CAP_SESSION_RESUME;
+
     return caps;
 }
 
@@ -484,6 +701,13 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
     session->proc.status = 0;
     session->proc.started_ms = psx_now_ms();
 
+    {
+        const char *base = strrchr(path, '/');
+
+        snprintf(session->command, sizeof(session->command), "%s",
+                 base ? base + 1 : path);
+    }
+
     /* Apply the current window size to the new terminal. */
     psx_tty_set_size(&session->tty, session->rows, session->cols);
 
@@ -549,6 +773,7 @@ psx_session_check_process(psx_session_t *session)
 
     session->proc.running = false;
     session->proc.status = status;
+    snprintf(session->command, sizeof(session->command), "%s", "psh");
 
     /* Drain anything the process left in the tty. */
     psx_session_on_tty_readable(session);
@@ -830,6 +1055,38 @@ psx_session_handle_frame(psx_session_t *session, const ptty_header_t *header,
         return 0;
     }
 
+    case PTTY_MSG_SESSIONS_REQUEST: {
+        static const char header_line[] =
+            "  ID  STATE       CLIENT           COMMAND\n";
+        const psx_session_manager_t *manager = session->manager;
+
+        psx_session_emit(session, PTTY_MSG_SESSIONS_DATA, header_line,
+                         sizeof(header_line) - 1);
+
+        if(manager) {
+            for(const psx_session_t *s = manager->sessions; s; s = s->next) {
+                char line[256];
+                int len = snprintf(line, sizeof(line),
+                                   "%4u  %-10s  %-15.15s  %.31s\n", s->id,
+                                   psx_session_state_name(s->state),
+                                   s->client_name[0] ? s->client_name : "-",
+                                   s->command);
+
+                if(len > 0) {
+                    psx_session_emit(session, PTTY_MSG_SESSIONS_DATA, line,
+                                     (size_t)len);
+                }
+            }
+        }
+
+        return psx_session_emit(session, PTTY_MSG_SESSIONS_DONE, NULL, 0) < 0
+                   ? PSX_SESSION_FRAME_ERROR
+                   : PSX_SESSION_FRAME_CONTINUE;
+    }
+
+    case PTTY_MSG_DETACH:
+        return PSX_SESSION_FRAME_DETACH;
+
     case PTTY_MSG_PING:
         return psx_session_emit(session, PTTY_MSG_PONG, payload,
                                 header->payload_length) < 0
@@ -841,12 +1098,12 @@ psx_session_handle_frame(psx_session_t *session, const ptty_header_t *header,
 
     case PTTY_MSG_CLOSE:
         session->state = PSX_SESSION_CLOSING;
-        return 1;
+        return PSX_SESSION_FRAME_CLOSE;
 
     default:
         PSX_LOGW("session %u: unexpected %s frame", session->id,
                  ptty_msg_name(header->type));
-        return -1;
+        return PSX_SESSION_FRAME_ERROR;
     }
 }
 

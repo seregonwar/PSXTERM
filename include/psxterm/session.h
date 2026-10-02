@@ -26,6 +26,13 @@
 #define PSX_SESSION_IN_MAX (512u * 1024u)
 #define PSX_SESSION_IN_HIGH_WATER (PSX_SESSION_IN_MAX - PTTY_MAX_PAYLOAD)
 
+/*
+ * Bounded ring buffer that holds terminal output while a session is detached.
+ * When it fills, the oldest bytes are dropped and the loss is reported to the
+ * client on reattach; a detached session never grows without limit.
+ */
+#define PSX_SESSION_SCROLLBACK_MAX (256u * 1024u)
+
 /* --- session environment ------------------------------------------------ */
 
 typedef struct {
@@ -50,6 +57,7 @@ typedef enum {
     PSX_SESSION_ACCEPTED = 0,
     PSX_SESSION_HANDSHAKING,
     PSX_SESSION_RUNNING,
+    PSX_SESSION_DETACHED,
     PSX_SESSION_CLOSING,
     PSX_SESSION_CLOSED
 } psx_session_state_t;
@@ -90,6 +98,21 @@ typedef struct psx_session {
     uint64_t input_backpressure_events;
     uint64_t input_discarded_bytes;
 
+    /*
+     * Session persistence. The resume token is a secret: it authenticates
+     * reattachment and is never written to the daemon log.
+     */
+    uint8_t resume_token[PTTY_RESUME_TOKEN_SIZE];
+    uint64_t detached_since_ms;
+    uint8_t *scrollback;
+    size_t scrollback_cap;
+    size_t scrollback_len;
+    size_t scrollback_start;
+    bool scrollback_truncated;
+
+    /* Short description of the current foreground command ("psh" when idle). */
+    char command[64];
+
     /* PipeTTY only: input was shut down to deliver EOF, so the tty must be
      * recreated before the next process is spawned. */
     bool tty_input_closed;
@@ -116,6 +139,27 @@ void psx_session_destroy(psx_session_t *session);
 
 /* Create tty, environment, cwd and the in-process shell; emit the banner. */
 int psx_session_begin(psx_session_t *session);
+
+/*
+ * Session persistence.
+ *
+ * Detaching keeps cwd, environment, shell, tty, foreground process and
+ * dimensions, and buffers further output in a bounded scrollback. Attaching
+ * takes over a new socket (validated with the resume token), reports whether
+ * output was lost while detached and resumes normal operation.
+ */
+void psx_session_detach(psx_session_t *session);
+int psx_session_attach(psx_session_t *session, int sock_fd);
+bool psx_session_check_token(const psx_session_t *session,
+                             const uint8_t *token, size_t len);
+bool psx_session_is_detached(const psx_session_t *session);
+
+/*
+ * Append to the bounded detached scrollback. Exposed for tests; sessions use
+ * it internally when emitting while detached.
+ */
+void psx_session_scrollback_append(psx_session_t *session, const uint8_t *data,
+                                   size_t len);
 
 /* Queue a framed message for the client. */
 int psx_session_emit(psx_session_t *session, uint8_t type, const void *data,
@@ -172,6 +216,15 @@ const char *psx_session_state_name(psx_session_state_t state);
  * protocol/IO error (server closes the session). */
 int psx_session_handle_frame(psx_session_t *session, const ptty_header_t *header,
                              const uint8_t *payload);
+
+/* Outcome of a handled frame, shared by session and handshake handlers. */
+enum {
+    PSX_SESSION_FRAME_CONTINUE = 0,
+    PSX_SESSION_FRAME_CLOSE = 1,    /* destroy the session */
+    PSX_SESSION_FRAME_DETACH = 2,   /* keep it alive without a client */
+    PSX_SESSION_FRAME_REPLACED = 3, /* connection handed to another session */
+    PSX_SESSION_FRAME_ERROR = -1
+};
 
 /* --- session manager ---------------------------------------------------- */
 

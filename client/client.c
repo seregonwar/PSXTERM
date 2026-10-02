@@ -33,6 +33,88 @@ static struct termios g_saved_termios;
 static bool g_raw_mode;
 static volatile sig_atomic_t g_winch;
 
+/* Session persistence state, filled from PTTY_MSG_SESSION_INFO. */
+static uint8_t g_resume_token[PTTY_RESUME_TOKEN_SIZE];
+static bool g_have_token;
+static uint32_t g_session_id;
+static bool g_print_token;
+
+static void
+client_store_session_info(const ptty_header_t *header, const uint8_t *payload)
+{
+    if(header->payload_length < 4 + PTTY_RESUME_TOKEN_SIZE) {
+        return;
+    }
+
+    g_session_id = (uint32_t)payload[0] | ((uint32_t)payload[1] << 8) |
+                   ((uint32_t)payload[2] << 16) | ((uint32_t)payload[3] << 24);
+    memcpy(g_resume_token, payload + 4, PTTY_RESUME_TOKEN_SIZE);
+    g_have_token = true;
+
+    if(g_print_token) {
+        char hex[PTTY_RESUME_TOKEN_SIZE * 2 + 1];
+
+        for(size_t i = 0; i < PTTY_RESUME_TOKEN_SIZE; i++) {
+            snprintf(hex + i * 2, 3, "%02x", g_resume_token[i]);
+        }
+        fprintf(stderr, "psxterm: session %u resume token: %s\n", g_session_id,
+                hex);
+    }
+}
+
+static int
+hex_decode_token(const char *hex, uint8_t out[PTTY_RESUME_TOKEN_SIZE])
+{
+    if(strlen(hex) != PTTY_RESUME_TOKEN_SIZE * 2) {
+        return -1;
+    }
+
+    for(size_t i = 0; i < PTTY_RESUME_TOKEN_SIZE; i++) {
+        unsigned value;
+
+        if(sscanf(hex + i * 2, "%2x", &value) != 1) {
+            return -1;
+        }
+        out[i] = (uint8_t)value;
+    }
+
+    return 0;
+}
+
+static bool
+is_all_digits(const char *text)
+{
+    if(!text || !*text) {
+        return false;
+    }
+
+    for(const char *p = text; *p; p++) {
+        if(*p < '0' || *p > '9') {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static void
+print_detach_notice(void)
+{
+    fprintf(stderr, "\r\n[detached] session %u\r\n", g_session_id);
+
+    if(g_have_token) {
+        char hex[PTTY_RESUME_TOKEN_SIZE * 2 + 1];
+
+        for(size_t i = 0; i < PTTY_RESUME_TOKEN_SIZE; i++) {
+            snprintf(hex + i * 2, 3, "%02x", g_resume_token[i]);
+        }
+        fprintf(stderr, "resume with: psxterm attach <host> %u --resume %s\r\n",
+                g_session_id, hex);
+    } else {
+        fprintf(stderr, "the daemon did not provide a resume token\r\n");
+    }
+}
+
 static void
 restore_terminal(void)
 {
@@ -413,6 +495,13 @@ run_interactive(int fd, ptty_reader_t *reader, bool use_raw)
                                header.payload_length);
                     break;
 
+                case PTTY_MSG_SESSION_INFO:
+                    client_store_session_info(&header, payload);
+                    break;
+
+                case PTTY_MSG_CAPS:
+                    break;
+
                 case PTTY_MSG_CLOSE:
                     return 0;
 
@@ -427,6 +516,26 @@ run_interactive(int fd, ptty_reader_t *reader, bool use_raw)
             ssize_t n = read(STDIN_FILENO, buffer, sizeof(buffer));
 
             if(n > 0) {
+                ssize_t detach_at = -1;
+
+                for(ssize_t i = 0; i < n; i++) {
+                    if(buffer[i] == 0x1d) { /* Ctrl+] detaches */
+                        detach_at = i;
+                        break;
+                    }
+                }
+
+                if(detach_at >= 0) {
+                    if(detach_at > 0) {
+                        send_frame(fd, PTTY_MSG_STDIN, buffer,
+                                   (uint32_t)detach_at);
+                    }
+                    send_frame(fd, PTTY_MSG_DETACH, NULL, 0);
+                    restore_terminal();
+                    print_detach_notice();
+                    return 0;
+                }
+
                 if(send_frame(fd, PTTY_MSG_STDIN, buffer, (uint32_t)n) < 0) {
                     break;
                 }
@@ -543,23 +652,159 @@ run_doctor(int fd, ptty_reader_t *reader, bool json)
     }
 }
 
+/* Lists the daemon's sessions and exits. */
+static int
+run_sessions(int fd, ptty_reader_t *reader)
+{
+    ptty_header_t header;
+    const uint8_t *payload = NULL;
+
+    if(send_frame(fd, PTTY_MSG_SESSIONS_REQUEST, NULL, 0) < 0) {
+        fprintf(stderr, "psxterm: cannot request the session list: %s\n",
+                strerror(errno));
+        return PSX_DIAG_EXIT_FAILED;
+    }
+
+    for(;;) {
+        if(wait_frame(reader, fd, &header, &payload, 15000) != 0) {
+            fprintf(stderr, "psxterm: session list timed out\n");
+            return PSX_DIAG_EXIT_FAILED;
+        }
+
+        switch(header.type) {
+        case PTTY_MSG_SESSIONS_DATA:
+            write_all(STDOUT_FILENO, payload, header.payload_length);
+            break;
+
+        case PTTY_MSG_SESSIONS_DONE:
+            send_frame(fd, PTTY_MSG_CLOSE, NULL, 0);
+            return 0;
+
+        case PTTY_MSG_PING:
+            send_frame(fd, PTTY_MSG_PONG, payload, header.payload_length);
+            break;
+
+        case PTTY_MSG_CLOSE:
+            return 0;
+
+        default:
+            /* The shell prompt and other frames are not part of the list. */
+            break;
+        }
+    }
+}
+
+/* Resumes a detached session and enters the interactive loop. */
+static int
+run_attach(int fd, ptty_reader_t *reader, uint32_t session_id,
+           const char *resume_hex, bool use_raw)
+{
+    uint8_t payload[PTTY_ATTACH_PAYLOAD_SIZE];
+
+    if(!resume_hex || hex_decode_token(resume_hex, payload + 4) < 0) {
+        fprintf(stderr,
+                "psxterm: attach requires --resume TOKEN (32 hex characters)\n");
+        return EXIT_USAGE;
+    }
+
+    payload[0] = (uint8_t)(session_id & 0xff);
+    payload[1] = (uint8_t)((session_id >> 8) & 0xff);
+    payload[2] = (uint8_t)((session_id >> 16) & 0xff);
+    payload[3] = (uint8_t)((session_id >> 24) & 0xff);
+
+    if(send_frame(fd, PTTY_MSG_ATTACH, payload, sizeof(payload)) < 0) {
+        fprintf(stderr, "psxterm: cannot request attach: %s\n",
+                strerror(errno));
+        return PSX_DIAG_EXIT_FAILED;
+    }
+
+    for(;;) {
+        ptty_header_t header;
+        const uint8_t *data = NULL;
+
+        if(wait_frame(reader, fd, &header, &data, 10000) != 0) {
+            fprintf(stderr, "psxterm: attach timed out\n");
+            return PSX_DIAG_EXIT_FAILED;
+        }
+
+        switch(header.type) {
+        case PTTY_MSG_ATTACH_OK:
+            g_session_id = session_id;
+            if(header.payload_length >= 5 && data[4]) {
+                fprintf(stderr,
+                        "psxterm: output was truncated while detached\n");
+            }
+            return run_interactive(fd, reader, use_raw);
+
+        case PTTY_MSG_ATTACH_FAIL: {
+            const char *reason = "unknown session";
+
+            if(header.payload_length >= 1) {
+                switch(data[0]) {
+                case PTTY_ATTACH_BAD_TOKEN:
+                    reason = "resume token rejected";
+                    break;
+                case PTTY_ATTACH_NOT_DETACHED:
+                    reason = "session is not detached";
+                    break;
+                case PTTY_ATTACH_LIMIT:
+                    reason = "daemon session limit reached";
+                    break;
+                case PTTY_ATTACH_UNKNOWN_SESSION:
+                default:
+                    reason = "unknown session";
+                    break;
+                }
+            }
+
+            fprintf(stderr, "psxterm: cannot attach to session %u: %s\n",
+                    session_id, reason);
+            return PSX_DIAG_EXIT_FAILED;
+        }
+
+        case PTTY_MSG_SESSION_INFO:
+            client_store_session_info(&header, data);
+            break;
+
+        case PTTY_MSG_PING:
+            send_frame(fd, PTTY_MSG_PONG, data, header.payload_length);
+            break;
+
+        case PTTY_MSG_CLOSE:
+            return PSX_DIAG_EXIT_FAILED;
+
+        default:
+            break;
+        }
+    }
+}
+
 static void
 usage(const char *argv0)
 {
     printf("usage: %s [options] <host>\n", argv0);
     printf("       %s doctor [--json] [options] <host>\n", argv0);
+    printf("       %s sessions [options] <host>\n", argv0);
+    printf("       %s attach [options] <host> <session> --resume TOKEN\n",
+           argv0);
     printf("\n");
     printf("Connect to a PSXTerm daemon on a PS4/PS5.\n");
     printf("\n");
-    printf("  -p, --port PORT    TCP port (default %d)\n", PSXTERM_DEFAULT_PORT);
-    printf("  -t, --token TOKEN  authentication token\n");
-    printf("  -e, --exec CMD     run one command and exit\n");
-    printf("      --no-raw       do not switch the local terminal to raw mode\n");
-    printf("      doctor         run remote diagnostics (exit 0 ready, 1\n");
-    printf("                     warnings, 2 not ready)\n");
-    printf("      --json         machine-readable diagnostics output\n");
-    printf("  -V, --version      print version\n");
-    printf("  -h, --help         this help\n");
+    printf("  -p, --port PORT     TCP port (default %d)\n", PSXTERM_DEFAULT_PORT);
+    printf("  -t, --token TOKEN   daemon authentication token\n");
+    printf("  -e, --exec CMD      run one command and exit\n");
+    printf("      --no-raw        do not switch the local terminal to raw mode\n");
+    printf("      doctor          run remote diagnostics (exit 0 ready, 1\n");
+    printf("                      warnings, 2 not ready)\n");
+    printf("      sessions        list the daemon's sessions\n");
+    printf("      attach          resume a detached session\n");
+    printf("      --resume TOKEN  32 hex character resume token for attach\n");
+    printf("      --print-token   print the session resume token at startup\n");
+    printf("      --json          machine-readable diagnostics output\n");
+    printf("  -V, --version       print version\n");
+    printf("  -h, --help          this help\n");
+    printf("\n");
+    printf("In a session, Ctrl+] detaches and prints how to resume it.\n");
 }
 
 int
@@ -569,8 +814,12 @@ main(int argc, char **argv)
     const char *token = NULL;
     const char *exec_command = NULL;
     const char *host = NULL;
+    const char *resume = NULL;
     bool use_raw = true;
     bool doctor_mode = false;
+    bool sessions_mode = false;
+    bool attach_mode = false;
+    uint32_t attach_id = 0;
     bool json = false;
     int fd;
     ptty_reader_t reader;
@@ -603,6 +852,19 @@ main(int argc, char **argv)
             json = true;
         } else if(strcmp(arg, "doctor") == 0 && !host) {
             doctor_mode = true;
+        } else if(strcmp(arg, "sessions") == 0 && !host) {
+            sessions_mode = true;
+        } else if(strcmp(arg, "attach") == 0 && !host) {
+            attach_mode = true;
+        } else if(strcmp(arg, "--resume") == 0) {
+            if(++i >= argc) {
+                return EXIT_USAGE;
+            }
+            resume = argv[i];
+        } else if(strcmp(arg, "--print-token") == 0) {
+            g_print_token = true;
+        } else if(attach_mode && attach_id == 0 && is_all_digits(arg)) {
+            attach_id = (uint32_t)strtoul(arg, NULL, 10);
         } else if(strcmp(arg, "-V") == 0 || strcmp(arg, "--version") == 0) {
             printf("psxterm %s (protocol %s)\n", PSXTERM_VERSION_STRING,
                    PSXTERM_PROTOCOL_NAME);
@@ -694,7 +956,8 @@ main(int argc, char **argv)
         }
     }
 
-    /* OPEN with window size and TERM. */
+    /* OPEN with window size and TERM (not used when attaching). */
+    if(!attach_mode)
     {
         uint8_t open_payload[4 + 64];
         uint16_t rows;
@@ -723,6 +986,33 @@ main(int argc, char **argv)
     }
 
     psx_set_nonblocking(fd, true);
+
+    if(attach_mode) {
+        int status;
+
+        if(attach_id == 0 || !resume) {
+            fprintf(stderr,
+                    "psxterm: attach needs a session id and --resume TOKEN\n");
+            close(fd);
+            return EXIT_USAGE;
+        }
+
+        fflush(stdout);
+        status = run_attach(fd, &reader, attach_id, resume, use_raw);
+        close(fd);
+
+        return status;
+    }
+
+    if(sessions_mode) {
+        int status;
+
+        fflush(stdout);
+        status = run_sessions(fd, &reader);
+        close(fd);
+
+        return status;
+    }
 
     if(doctor_mode) {
         int status;
