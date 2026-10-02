@@ -55,6 +55,9 @@ void psx_tty_close(psx_tty_t *tty);
 psx_tty_backend_t psx_tty_default_backend(void);
 const char *psx_tty_backend_name(psx_tty_backend_t backend);
 
+/* Force a backend (PSX_TTY_BACKEND_NONE restores runtime auto-detection). */
+void psx_tty_force_backend(psx_tty_backend_t backend);
+
 /* Open a tty; returns 0 on success, -1 on error (errno set). */
 int psx_tty_open(psx_tty_t *tty, psx_tty_backend_t backend, uint16_t rows,
                  uint16_t cols);

@@ -451,6 +451,23 @@ psx_session_emit_exit(psx_session_t *session, int exit_code, uint8_t kind)
     psx_session_emit(session, PTTY_MSG_EXIT, payload, sizeof(payload));
 }
 
+static void
+session_reopen_tty(psx_session_t *session)
+{
+    psx_tty_backend_t backend = session->tty.backend;
+    uint16_t rows = session->tty.rows;
+    uint16_t cols = session->tty.cols;
+
+    psx_tty_close(&session->tty);
+
+    if(psx_tty_open(&session->tty, backend, rows, cols) < 0) {
+        PSX_LOGW("session %u: cannot recreate %s tty: %s", session->id,
+                 psx_tty_backend_name(backend), strerror(errno));
+    }
+
+    session->tty_input_closed = false;
+}
+
 bool
 psx_session_check_process(psx_session_t *session)
 {
@@ -479,6 +496,10 @@ psx_session_check_process(psx_session_t *session)
 
     /* Drain anything the process left in the tty. */
     psx_session_on_tty_readable(session);
+
+    if(session->tty_input_closed) {
+        session_reopen_tty(session);
+    }
 
     if(rc == 0 && WIFEXITED(status)) {
         exit_code = WEXITSTATUS(status);
@@ -520,8 +541,15 @@ session_forward_to_process(psx_session_t *session, const uint8_t *payload,
             return psx_session_write_tty(session, &eof, 1);
         }
 
-        if(session->tty.slave_fd >= 0) {
-            shutdown(session->tty.slave_fd, SHUT_WR);
+        /*
+         * PipeTTY: the child shares the slave end of the socketpair, so EOF
+         * has to be produced by shutting down the master's write direction.
+         * That is not reversible - the session recreates the tty once the
+         * process has been reaped.
+         */
+        if(session->tty.master_fd >= 0) {
+            shutdown(session->tty.master_fd, SHUT_WR);
+            session->tty_input_closed = true;
         }
 
         return 0;

@@ -41,10 +41,23 @@ psx_tty_backend_name(psx_tty_backend_t backend)
     }
 }
 
+static int g_forced_backend = -1;
+
+void
+psx_tty_force_backend(psx_tty_backend_t backend)
+{
+    g_forced_backend =
+        backend == PSX_TTY_BACKEND_NONE ? -1 : (int)backend;
+}
+
 psx_tty_backend_t
 psx_tty_default_backend(void)
 {
     static int cached = -1;
+
+    if(g_forced_backend >= 0) {
+        return (psx_tty_backend_t)g_forced_backend;
+    }
 
     if(cached < 0) {
         psx_tty_probe_result_t probe;

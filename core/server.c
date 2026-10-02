@@ -667,6 +667,7 @@ usage(const char *argv0)
     printf("      --handshake-timeout MS  handshake deadline (default %d)\n",
            SERVER_DEFAULT_HANDSHAKE_MS);
     printf("      --idle-timeout MS    drop idle sessions (default off)\n");
+    printf("      --tty MODE           auto|pty|pipe (default auto)\n");
     printf("  -v, --verbose            debug logging\n");
     printf("  -q, --quiet              errors only\n");
     printf("      --version            print version\n");
@@ -723,6 +724,21 @@ parse_args(int argc, char **argv, psx_server_config_t *config)
                 return -1;
             }
             config->idle_timeout_ms = value;
+        } else if(strcmp(arg, "--tty") == 0) {
+            if(++i >= argc) {
+                return -1;
+            }
+            if(strcmp(argv[i], "auto") == 0) {
+                psx_tty_force_backend(PSX_TTY_BACKEND_NONE);
+            } else if(strcmp(argv[i], "pty") == 0) {
+                psx_tty_force_backend(PSX_TTY_BACKEND_FREEBSD_PTY);
+            } else if(strcmp(argv[i], "pipe") == 0) {
+                psx_tty_force_backend(PSX_TTY_BACKEND_PIPE);
+            } else {
+                PSX_LOGE("invalid tty backend: %s (want auto|pty|pipe)",
+                         argv[i]);
+                return -1;
+            }
         } else if(strcmp(arg, "-v") == 0 || strcmp(arg, "--verbose") == 0) {
             psx_log_set_level(PSX_LOG_DEBUG);
         } else if(strcmp(arg, "-q") == 0 || strcmp(arg, "--quiet") == 0) {

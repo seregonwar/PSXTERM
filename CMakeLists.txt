@@ -97,6 +97,12 @@ if(PSXTERM_PLATFORM STREQUAL "host" AND NOT CMAKE_CROSSCOMPILING)
 
   set(PSXTERM_TESTS
     test_protocol
+    test_parser
+    test_env
+    test_registry
+    test_session
+    test_tty
+    test_shell
   )
 
   foreach(test_name ${PSXTERM_TESTS})

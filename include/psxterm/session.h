@@ -64,6 +64,10 @@ typedef struct psx_session {
 
     bool exec_pending;
 
+    /* PipeTTY only: input was shut down to deliver EOF, so the tty must be
+     * recreated before the next process is spawned. */
+    bool tty_input_closed;
+
     /* 0 while the shell runs in-process (this build); reserved for a
      * process-backed shell on target platforms. */
     pid_t shell_pid;

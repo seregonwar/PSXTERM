@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <termios.h>
 #include <unistd.h>
 
 static void
@@ -35,6 +37,18 @@ main(int argc, char **argv)
 
     printf("isatty: stdin=%d stdout=%d stderr=%d\n", isatty(0) ? 1 : 0,
            isatty(1) ? 1 : 0, isatty(2) ? 1 : 0);
+
+    {
+        struct winsize ws;
+
+        memset(&ws, 0, sizeof(ws));
+        if(ioctl(STDIN_FILENO, TIOCGWINSZ, &ws) == 0) {
+            printf("winsize: rows=%u cols=%u\n", (unsigned)ws.ws_row,
+                   (unsigned)ws.ws_col);
+        } else {
+            printf("winsize: unavailable\n");
+        }
+    }
 
     printf("stdin> ");
     fflush(stdout);
