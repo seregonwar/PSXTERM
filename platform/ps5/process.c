@@ -845,15 +845,16 @@ build_payload_args(pid_t pid)
     PSX_LOGI("ps5: args: sockets overlapped, creating pipe");
 
     /*
-     * The pipe() call runs inside the victim, so its output buffer must be a
-     * victim address: handing it a daemon address makes the callee write into
-     * an address it cannot reach and the single-step loop never unwinds.
+     * SAFETY RULE, learned the hard way (two kernel panics on hardware):
+     * rwpipe and kpipe_addr MUST describe a real pipe created inside the
+     * victim. Handing the payload runtime any other descriptor - a session
+     * socket, for instance - makes it treat that kernel file object as a pipe
+     * and corrupt kernel memory.
      *
-     * The runtime uses these two descriptors for its own stdio, and nothing
-     * on this side relays them yet, which is why libc stdio from a spawned
-     * payload is still invisible while raw descriptor writes reach the
-     * session. Pointing them at 0/1 instead makes the runtime block on the
-     * first read, so the private pipe stays for now.
+     * The runtime reads its input from rwpipe[0] while starting, so the pipe
+     * must exist and stay empty until the loader relays something into it.
+     * Relaying through the daemon's own end of this pipe is the next step;
+     * until then the private pipe is the only safe configuration.
      */
     {
         intptr_t victim_fds = buf + 0x400;
@@ -870,6 +871,11 @@ build_payload_args(pid_t pid)
             PSX_LOGE("ps5: args: cannot read the created pipe fds");
             return 0;
         }
+    }
+
+    if(pipe_fds[0] < 0 || pipe_fds[1] < 0) {
+        PSX_LOGE("ps5: args: refusing a non-pipe runtime handle");
+        return 0;
     }
 
     PSX_LOGI("ps5: args: pipe %d,%d", pipe_fds[0], pipe_fds[1]);
