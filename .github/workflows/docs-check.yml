@@ -48,11 +48,13 @@ jobs:
           done < <(git ls-files -z '*.md')
           exit "$status"
 
-      - name: Ensure the local development prompt is not tracked
+      - name: Ensure local development prompts are not tracked
         run: |
           set -uo pipefail
-          if git ls-files --error-unmatch "PSXTerm — Strict Incremental Development Prompt.md" >/dev/null 2>&1; then
-            echo "::error::The local development prompt must never be committed to this repository."
+          tracked="$(git ls-files | grep -E '^PSXTerm .*Prompt.*\.md$' || true)"
+          if [ -n "$tracked" ]; then
+            echo "::error::Local development prompts must never be committed to this repository."
+            echo "$tracked"
             exit 1
           fi
-          echo "development prompt is not tracked"
+          echo "no development prompt is tracked"
