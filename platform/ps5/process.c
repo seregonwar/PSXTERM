@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <machine/reg.h>
@@ -56,6 +57,45 @@
 #define PFLAGS(x)                                                            \
     ((((x) & PF_R) ? PROT_READ : 0) | (((x) & PF_W) ? PROT_WRITE : 0) |      \
      (((x) & PF_X) ? PROT_EXEC : 0))
+
+/* Single-step loops must not spin forever if the remote never returns, and
+ * waits for a stop must not block the whole daemon. */
+#define PSX_PT_STEP_LIMIT 4000000u
+#define PSX_WAIT_LIMIT_MS 10000
+
+static int
+wait_for_stop(pid_t pid, int timeout_ms, int *status_out)
+{
+    uint64_t deadline = psx_now_ms() + (uint64_t)timeout_ms;
+
+    for(;;) {
+        int status = 0;
+        pid_t rc = waitpid(pid, &status, WNOHANG);
+
+        if(rc == pid) {
+            if(status_out) {
+                *status_out = status;
+            }
+            return 0;
+        }
+        if(rc < 0) {
+            if(errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if(psx_now_ms() >= deadline) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+
+        {
+            struct timespec pause = {.tv_sec = 0, .tv_nsec = 20 * 1000 * 1000};
+
+            nanosleep(&pause, NULL);
+        }
+    }
+}
 
 /* libkernel NIDs used by the loader protocol (same values as elfldr). */
 #define NID_SYSCALL "HoLVWNanBBc"
@@ -102,7 +142,7 @@ pt_attach(pid_t pid)
         return -1;
     }
 
-    if(waitpid(pid, 0, 0) == -1) {
+    if(wait_for_stop(pid, PSX_WAIT_LIMIT_MS, NULL) != 0) {
         return -1;
     }
 
@@ -224,12 +264,20 @@ pt_call(pid_t pid, intptr_t addr, ...)
         return -1;
     }
 
-    while(jmp_reg.r_rsp <= bak_reg.r_rsp) {
-        if(pt_step(pid)) {
-            return -1;
-        }
-        if(pt_getregs(pid, &jmp_reg)) {
-            return -1;
+    {
+        unsigned steps = 0;
+
+        while(jmp_reg.r_rsp <= bak_reg.r_rsp) {
+            if(++steps > PSX_PT_STEP_LIMIT) {
+                errno = ETIMEDOUT;
+                return -1;
+            }
+            if(pt_step(pid)) {
+                return -1;
+            }
+            if(pt_getregs(pid, &jmp_reg)) {
+                return -1;
+            }
         }
     }
 
@@ -276,12 +324,20 @@ pt_syscall(pid_t pid, int sysno, ...)
         return -1;
     }
 
-    while(jmp_reg.r_rsp <= bak_reg.r_rsp) {
-        if(pt_step(pid)) {
-            return -1;
-        }
-        if(pt_getregs(pid, &jmp_reg)) {
-            return -1;
+    {
+        unsigned steps = 0;
+
+        while(jmp_reg.r_rsp <= bak_reg.r_rsp) {
+            if(++steps > PSX_PT_STEP_LIMIT) {
+                errno = ETIMEDOUT;
+                return -1;
+            }
+            if(pt_step(pid)) {
+                return -1;
+            }
+            if(pt_getregs(pid, &jmp_reg)) {
+                return -1;
+            }
         }
     }
 
@@ -788,7 +844,6 @@ psx_platform_spawn(const psx_spawn_options_t *options,
     uint8_t *stack;
     pid_t pid;
     pid_t mypid = getpid();
-    int attempts;
 
     stage_set(failure, PSX_SPAWN_STAGE_PREPARE, 0, NULL);
 
@@ -849,38 +904,39 @@ psx_platform_spawn(const psx_spawn_options_t *options,
     stage_set(failure, PSX_SPAWN_STAGE_ATTACH, 0, NULL);
 
     /* Wait for the child to reach the exec stop. */
-    if(waitpid(pid, 0, 0) < 0) {
-        stage_set(failure, PSX_SPAWN_STAGE_ATTACH, errno,
-                  "victim exec wait failed");
-        PSX_LOGE("ps5: waitpid: %s", strerror(errno));
-        kill(pid, SIGKILL);
-        free(elf);
-        return -1;
-    }
+    {
+        int status = 0;
 
-    for(attempts = 0; attempts < 100; attempts++) {
-        if(pt_attach(pid) == 0) {
-            break;
-        }
-        if(errno != EBUSY) {
+        if(wait_for_stop(pid, PSX_WAIT_LIMIT_MS, &status) != 0) {
             stage_set(failure, PSX_SPAWN_STAGE_ATTACH, errno,
-                      "pt_attach failed");
-            PSX_LOGE("ps5: pt_attach: %s", strerror(errno));
+                      "victim never stopped (ptrace/execve blocked?)");
+            PSX_LOGE("ps5: victim did not stop: %s", strerror(errno));
             kill(pid, SIGKILL);
             free(elf);
             return -1;
         }
-        sched_yield();
+
+        if(!WIFSTOPPED(status)) {
+            char detail[128];
+
+            snprintf(detail, sizeof(detail),
+                     "victim exited before attach (status %d, exit %d)",
+                     status,
+                     WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+            stage_set(failure, PSX_SPAWN_STAGE_ATTACH, 0, detail);
+            PSX_LOGE("ps5: %s", detail);
+            free(elf);
+            return -1;
+        }
     }
-    if(attempts == 100) {
-        stage_set(failure, PSX_SPAWN_STAGE_ATTACH, EBUSY,
-                  "pt_attach kept returning EBUSY");
-        PSX_LOGE("ps5: pt_attach kept returning EBUSY");
-        kill(pid, SIGKILL);
-        free(elf);
-        errno = EBUSY;
-        return -1;
-    }
+
+    /*
+     * No PT_ATTACH here: the child declares PT_TRACE_ME before execve, so we
+     * are already its tracer and the stop we just reaped is the attach point.
+     * The reference loader does the same (it only attaches on PS4, where the
+     * mechanism differs); calling PT_ATTACH on an already-traced process is
+     * what made the first hardware spawns fail at ATTACH.
+     */
 
     /* Let the kernel assign process parameters to the eboot. */
     if(pt_syscall(pid, SYS_PROCESS_NEEDED_AND_RELOCATE)) {
@@ -922,10 +978,19 @@ psx_platform_spawn(const psx_spawn_options_t *options,
         return -1;
     }
 
-    if(pt_continue(pid, SIGCONT) || waitpid(pid, 0, 0) == -1) {
+    if(pt_continue(pid, SIGCONT)) {
         stage_set(failure, PSX_SPAWN_STAGE_SET_REGISTERS, errno,
                   "continue to the eboot entry failed");
         PSX_LOGE("ps5: continue to entry failed");
+        pt_detach(pid, SIGKILL);
+        free(elf);
+        return -1;
+    }
+
+    if(wait_for_stop(pid, PSX_WAIT_LIMIT_MS, NULL) != 0) {
+        stage_set(failure, PSX_SPAWN_STAGE_SET_REGISTERS, errno,
+                  "eboot entry breakpoint never hit");
+        PSX_LOGE("ps5: entry breakpoint timeout");
         pt_detach(pid, SIGKILL);
         free(elf);
         return -1;

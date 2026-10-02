@@ -1146,7 +1146,7 @@ check_process(psx_diag_report_t *report)
     if(diag_cli_run(&opts, &capture, &failure, detail, sizeof(detail)) < 0) {
         psx_diag_add(group, "spawn", PSX_DIAG_FAIL, failure.error_code,
                      "stage %s: %s", psx_spawn_stage_name(failure.stage),
-                     detail);
+                     failure.detail[0] ? failure.detail : detail);
         skip_process_checks(group, "spawn failed", false);
         return;
     }

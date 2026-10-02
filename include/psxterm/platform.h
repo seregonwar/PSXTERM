@@ -12,6 +12,15 @@
 /* One-time platform setup. Returns false on a fatal platform problem. */
 bool psx_platform_init(void);
 
+/*
+ * Escape the payload sandbox (uid/caps/authid/root vnode) before anything
+ * else runs. Derived from the reference privilege manager used by MemDBG:
+ * on PS5 the payload is injected into a jailed Sony process, and without this
+ * kernel helpers and ptrace are unreliable (spawns hang or fail with EPERM).
+ * PS4 deliberately keeps the loader's shared credentials untouched.
+ */
+bool psx_privilege_raise(void);
+
 /* Human readable platform name, e.g. "PS5", "PS4", "Host". */
 const char *psx_platform_name(void);
 

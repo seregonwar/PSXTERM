@@ -64,6 +64,12 @@ psx_platform_init(void)
     return psx_fs_prepare();
 }
 
+bool
+psx_privilege_raise(void)
+{
+    return true;
+}
+
 const char *
 psx_platform_name(void)
 {

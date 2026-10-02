@@ -29,7 +29,22 @@ psx_platform_list_processes(psx_proc_entry_t *entries, size_t max_entries)
 bool
 psx_platform_init(void)
 {
+    psx_privilege_raise();
+
     return psx_fs_prepare();
+}
+
+/*
+ * PS4 payloads are hosted by GoldHEN's long-lived loader process: rewriting
+ * its authid/prison/root vnodes would change the execution context used by
+ * system notifications and later ELF launches, so this stays untouched (the
+ * reference privilege manager does the same on PS4). Only the filesystem
+ * preparation below touches the sandbox.
+ */
+bool
+psx_privilege_raise(void)
+{
+    return true;
 }
 
 const char *
