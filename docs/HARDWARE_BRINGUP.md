@@ -23,8 +23,11 @@ run on hardware; the process (exec) backend is still being validated.
 | `/data/psxterm` + `/data/psxterm/bin` | FAIL on first run: they did not exist; the daemon now creates them |
 | Real FreeBSDPTY (`/dev/ptmx`) | **NOT AVAILABLE**: `/dev/ptmx` and `/dev/pts` do not exist on the console; `ls /dev` shows `deci_tty*`, `ctty`, `ttyu0`. PipeTTY is the working backend (`REAL PTY NOT YET AVAILABLE`) |
 | Monotonic clock | FAIL: `clock_gettime(CLOCK_MONOTONIC)` does not advance (diagnostics elapsed time was 0 ms); `psx_now_ms()` now falls back to `CLOCK_REALTIME`/`gettimeofday` and a doctor check verifies that the clock advances |
-| External execution (`cli_test` spawn) | PENDING (was blocked on cli_test not being installed; push is implemented) |
-| Resize / signals on hardware | PENDING |
+| Sandbox escape (privileges) | FIXED, HARDWARE TESTED: the payload stayed in the Sony jail and everything downstream misbehaved. `psx_privilege_raise()` (ported from the MemDBG privilege manager) applies full caps, the system authid, uid 0 and the root/jail vnode; hardware log confirms `privilege: sandbox escaped (root vnode 0xffffc5300340a760)` |
+| Instance replacement without reboot | PASS: pid file + SIGTERM/SIGKILL replaces only the previous psxtermd. Verified repeatedly, including recovering a daemon hung inside a kernel call with no console reboot |
+| Spawn stage progress | Reaches `DUP_STDIO`: CREATE_VICTIM, exec stop, RELOCATE (syscall 599), the eboot breakpoint and LOAD_ELF all complete; stdio wiring into the victim fails (`dup2=-1 rdup=-1`, i.e. EPERM) because the victim is still jailed |
+| Victim privilege raise | OPEN FINDING: lifting the victim's sandbox (as the reference loader does) after the ptrace exec stop **hangs** the victim on this firmware. Next: try before tracing, or follow MemDBG's `memegdb_privilege_elevate_target()` ordering (see the privilege module) |
+| Resize / signals on hardware | PENDING (blocked on external execution) |
 
 The first doctor run reported `NOT READY` with these findings - exactly the
 kind of stage-level information the diagnostics were built for.

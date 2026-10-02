@@ -772,49 +772,85 @@ stage_set(psx_spawn_failure_t *failure, psx_spawn_stage_t stage, int error_code,
 }
 
 /*
+ * The victim is a jailed Sony process, and the reference loader lifts its
+ * sandbox before touching its descriptors. Doing that here (after the ptrace
+ * exec stop) hangs the victim on this firmware, so the call is deliberately
+ * not wired in yet: see docs/HARDWARE_BRINGUP.md for the open finding.
+ */
+static void
+raise_target_privileges(pid_t pid)
+{
+    uint8_t caps[16];
+    intptr_t root_vnode;
+
+    memset(caps, 0xff, sizeof(caps));
+
+    root_vnode = kernel_get_root_vnode();
+    if(root_vnode != 0) {
+        kernel_set_proc_rootdir(pid, root_vnode);
+        kernel_set_proc_jaildir(pid, 0);
+    }
+
+    kernel_set_ucred_uid(pid, 0);
+    kernel_set_ucred_caps(pid, caps);
+}
+
+/*
  * Duplicate the daemon-owned stdio descriptors into the victim process.
- * Distinct stdin/stdout/stderr descriptors are honored so diagnostics can
- * verify that the streams really are separate.
+ *
+ * RFCFDG hands the child a copy of our descriptor table and execve keeps
+ * every non-CLOEXEC descriptor, so the session fds are normally already
+ * present in the victim under the same numbers: clear CLOEXEC before the
+ * fork and dup2 directly. The rdup syscall is kept as the fallback for the
+ * case where the numbers did not survive.
  */
 static int
 dup_stdio(pid_t pid, pid_t owner, const psx_spawn_options_t *options,
           psx_spawn_failure_t *failure)
 {
-    int in_fd;
-    int out_fd;
-    int err_fd;
+    int in_fd = options->stdin_fd;
+    int out_fd = options->stdout_fd;
+    int err_fd = options->stderr_fd;
+    char detail[128];
 
-    if((in_fd = pt_rdup(pid, owner, options->stdin_fd)) < 0) {
-        stage_set(failure, PSX_SPAWN_STAGE_DUP_STDIO, errno,
-                  "stdin duplication failed");
-        return -1;
-    }
+    {
+        int rc = (int)pt_dup2(pid, in_fd, STDIN_FILENO);
 
-    out_fd = options->stdout_fd == options->stdin_fd
-                 ? in_fd
-                 : pt_rdup(pid, owner, options->stdout_fd);
-    err_fd = options->stderr_fd == options->stdin_fd
-                 ? in_fd
-                 : (options->stderr_fd == options->stdout_fd
-                        ? out_fd
-                        : pt_rdup(pid, owner, options->stderr_fd));
+        if(rc < 0) {
+            int fallback = (int)pt_rdup(pid, owner, options->stdin_fd);
 
-    if(out_fd < 0 || err_fd < 0) {
-        stage_set(failure, PSX_SPAWN_STAGE_DUP_STDIO, errno,
-                  "stdout/stderr duplication failed");
-        pt_close(pid, in_fd);
-        if(out_fd >= 0 && out_fd != in_fd) {
-            pt_close(pid, out_fd);
+            if(fallback < 0) {
+                snprintf(detail, sizeof(detail),
+                         "stdin duplication failed (dup2=%d rdup=%d)", rc,
+                         fallback);
+                stage_set(failure, PSX_SPAWN_STAGE_DUP_STDIO, errno, detail);
+                return -1;
+            }
+
+            in_fd = fallback;
+            pt_dup2(pid, in_fd, STDIN_FILENO);
         }
-        return -1;
     }
 
-    pt_close(pid, STDIN_FILENO);
-    pt_close(pid, STDOUT_FILENO);
-    pt_close(pid, STDERR_FILENO);
-    pt_dup2(pid, in_fd, STDIN_FILENO);
-    pt_dup2(pid, out_fd, STDOUT_FILENO);
-    pt_dup2(pid, err_fd, STDERR_FILENO);
+    if(pt_dup2(pid, out_fd, STDOUT_FILENO) < 0) {
+        out_fd = pt_rdup(pid, owner, options->stdout_fd);
+        if(out_fd < 0) {
+            stage_set(failure, PSX_SPAWN_STAGE_DUP_STDIO, errno,
+                      "stdout duplication failed");
+            return -1;
+        }
+        pt_dup2(pid, out_fd, STDOUT_FILENO);
+    }
+
+    if(pt_dup2(pid, err_fd, STDERR_FILENO) < 0) {
+        err_fd = pt_rdup(pid, owner, options->stderr_fd);
+        if(err_fd < 0) {
+            stage_set(failure, PSX_SPAWN_STAGE_DUP_STDIO, errno,
+                      "stderr duplication failed");
+            return -1;
+        }
+        pt_dup2(pid, err_fd, STDERR_FILENO);
+    }
 
     if(out_fd != in_fd) {
         pt_close(pid, out_fd);
@@ -885,6 +921,20 @@ psx_platform_spawn(const psx_spawn_options_t *options,
     ctx.envp = options->envp;
     ctx.path = PS5_EBOOT;
     *child_ctx = ctx;
+
+    /*
+     * The victim keeps our session descriptors across execve (RFCFDG copies
+     * the table; execve only drops CLOEXEC ones), which is what makes the
+     * direct dup2 in dup_stdio() work.
+     */
+    psx_set_cloexec(options->stdin_fd, false);
+    if(options->stdout_fd != options->stdin_fd) {
+        psx_set_cloexec(options->stdout_fd, false);
+    }
+    if(options->stderr_fd != options->stdin_fd &&
+       options->stderr_fd != options->stdout_fd) {
+        psx_set_cloexec(options->stderr_fd, false);
+    }
 
     stage_set(failure, PSX_SPAWN_STAGE_CREATE_VICTIM, 0, NULL);
 
@@ -1006,6 +1056,8 @@ psx_platform_spawn(const psx_spawn_options_t *options,
 
     /* Wire stdio to the session tty before starting the payload. */
     stage_set(failure, PSX_SPAWN_STAGE_DUP_STDIO, 0, NULL);
+
+    (void)raise_target_privileges;
 
     if(dup_stdio(pid, mypid, options, failure) < 0) {
         PSX_LOGE("ps5: stdio duplication failed: %s", strerror(errno));
