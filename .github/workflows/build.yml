@@ -1,0 +1,66 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "core/**"
+      - "shell/**"
+      - "include/**"
+      - "platform/**"
+      - "client/**"
+      - "tools/**"
+      - "tests/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/build.yml"
+  pull_request:
+    paths:
+      - "core/**"
+      - "shell/**"
+      - "include/**"
+      - "platform/**"
+      - "client/**"
+      - "tools/**"
+      - "tests/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    name: Host build and tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build-host -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build-host --parallel
+
+      - name: Unit tests
+        run: ctest --test-dir build-host --output-on-failure
+
+      - name: TTY capability probe
+        run: ./build-host/psxterm-ttyprobe
+
+      - name: Integration tests
+        if: runner.os == 'Linux'
+        run: python3 tests/integration/test_e2e.py --build build-host

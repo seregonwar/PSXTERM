@@ -1,0 +1,135 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    name: Host build and tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build-host -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build-host --parallel
+
+      - name: Unit tests
+        run: ctest --test-dir build-host --output-on-failure
+
+      - name: TTY capability probe
+        run: ./build-host/psxterm-ttyprobe
+
+      - name: Integration tests
+        if: runner.os == 'Linux'
+        run: python3 tests/integration/test_e2e.py --build build-host
+
+  sanitizers:
+    name: Sanitizers (ASan + UBSan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build with AddressSanitizer
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer -g" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address"
+          cmake --build build-asan --parallel
+
+      - name: Run ASan tests
+        run: ctest --test-dir build-asan --output-on-failure
+
+      - name: Build with UndefinedBehaviorSanitizer
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-ubsan -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=undefined"
+          cmake --build build-ubsan --parallel
+
+      - name: Run UBSan tests
+        run: ctest --test-dir build-ubsan --output-on-failure
+
+  payloads:
+    name: Payload build (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ps5
+            sdk_repo: ps5-payload-dev/sdk
+            sdk_asset: ps5-payload-sdk.zip
+            toolchain: prospero.cmake
+          - platform: ps4
+            sdk_repo: ps4-payload-dev/sdk
+            sdk_asset: ps4-payload-sdk.zip
+            toolchain: orbis.cmake
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install LLVM 18 and packaging tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 llvm-18 llvm-18-dev wget unzip
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+
+      - name: Download payload SDK
+        run: |
+          set -euo pipefail
+          wget -q "https://github.com/${{ matrix.sdk_repo }}/releases/latest/download/${{ matrix.sdk_asset }}"
+          unzip -q "${{ matrix.sdk_asset }}" -d sdk
+          SDK_DIR="$(find sdk -mindepth 1 -maxdepth 1 -type d | head -1)"
+          test -n "$SDK_DIR"
+          echo "SDK_DIR=$SDK_DIR" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-${{ matrix.platform }} \
+            -DCMAKE_TOOLCHAIN_FILE="$SDK_DIR/toolchain/${{ matrix.toolchain }}"
+
+      - name: Build payloads
+        run: |
+          set -euo pipefail
+          cmake --build build-${{ matrix.platform }} --parallel
+          test -x build-${{ matrix.platform }}/psxtermd
+          test -x build-${{ matrix.platform }}/psxterm-ttyprobe
+          test -f build-${{ matrix.platform }}/cli_test.elf
+
+      - name: Report artifacts
+        run: |
+          ls -la build-${{ matrix.platform }}/psxtermd \
+                 build-${{ matrix.platform }}/psxterm-ttyprobe \
+                 build-${{ matrix.platform }}/cli_test.elf
+          file build-${{ matrix.platform }}/psxtermd

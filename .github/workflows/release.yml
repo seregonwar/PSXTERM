@@ -1,0 +1,208 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example 0.1.0 or v0.1.0 (defaults to the run number)"
+        required: false
+        type: string
+      draft:
+        description: "Create the GitHub release as draft"
+        required: false
+        default: false
+        type: boolean
+      prerelease:
+        description: "Mark the GitHub release as prerelease"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Resolve release identity
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: identity
+        run: |
+          set -euo pipefail
+          version="${{ github.event.inputs.version }}"
+          if [ -z "$version" ]; then
+            if [ "${{ github.event_name }}" = "push" ]; then
+              version="${{ github.ref_name }}"
+            else
+              version="v${{ github.run_number }}"
+            fi
+          fi
+          case "$version" in
+            v*) ;;
+            *) version="v$version" ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release version: $version"
+
+  host:
+    name: Host binaries (${{ matrix.name }})
+    needs: preflight
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+          - os: macos-latest
+            name: macos-arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-release --parallel
+
+      - name: Unit tests
+        run: ctest --test-dir build-release --output-on-failure
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          version="${{ needs.preflight.outputs.version }}"
+          package="psxterm-${version}-${{ matrix.name }}"
+          mkdir -p "dist/$package"
+          cp build-release/psxtermd build-release/psxterm \
+             build-release/psxterm-ttyprobe build-release/cli_test "dist/$package/"
+          cp README.md LICENSE "dist/$package/"
+          tar -C dist -czf "dist/$package.tar.gz" "$package"
+          rm -rf "dist/$package"
+
+      - name: Upload host artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: psxterm-${{ matrix.name }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  payloads:
+    name: Payload binaries (${{ matrix.platform }})
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ps5
+            sdk_repo: ps5-payload-dev/sdk
+            sdk_asset: ps5-payload-sdk.zip
+            toolchain: prospero.cmake
+          - platform: ps4
+            sdk_repo: ps4-payload-dev/sdk
+            sdk_asset: ps4-payload-sdk.zip
+            toolchain: orbis.cmake
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install LLVM 18 and packaging tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 llvm-18 llvm-18-dev wget unzip
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+
+      - name: Download payload SDK
+        run: |
+          set -euo pipefail
+          wget -q "https://github.com/${{ matrix.sdk_repo }}/releases/latest/download/${{ matrix.sdk_asset }}"
+          unzip -q "${{ matrix.sdk_asset }}" -d sdk
+          SDK_DIR="$(find sdk -mindepth 1 -maxdepth 1 -type d | head -1)"
+          test -n "$SDK_DIR"
+          echo "SDK_DIR=$SDK_DIR" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-${{ matrix.platform }} \
+            -DCMAKE_TOOLCHAIN_FILE="$SDK_DIR/toolchain/${{ matrix.toolchain }}"
+
+      - name: Build payloads
+        run: |
+          set -euo pipefail
+          cmake --build build-${{ matrix.platform }} --parallel
+          test -x build-${{ matrix.platform }}/psxtermd
+          test -x build-${{ matrix.platform }}/psxterm-ttyprobe
+          test -f build-${{ matrix.platform }}/cli_test.elf
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          version="${{ needs.preflight.outputs.version }}"
+          package="psxterm-${version}-${{ matrix.platform }}"
+          mkdir -p "dist/$package"
+          cp build-${{ matrix.platform }}/psxtermd "dist/$package/psxtermd-${{ matrix.platform }}.elf"
+          cp build-${{ matrix.platform }}/psxterm-ttyprobe "dist/$package/psxterm-ttyprobe-${{ matrix.platform }}.elf"
+          cp build-${{ matrix.platform }}/cli_test.elf "dist/$package/cli_test-${{ matrix.platform }}.elf"
+          cp README.md LICENSE "dist/$package/"
+          tar -C dist -czf "dist/$package.tar.gz" "$package"
+          rm -rf "dist/$package"
+
+      - name: Upload payload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: psxterm-${{ matrix.platform }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub release
+    needs:
+      - preflight
+      - host
+      - payloads
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Prepare release assets
+        run: |
+          set -euo pipefail
+          find dist -maxdepth 1 -type f -printf '%f\n' | sort
+          test -n "$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.preflight.outputs.version }}
+          name: PSXTerm ${{ needs.preflight.outputs.version }}
+          draft: ${{ github.event.inputs.draft == 'true' }}
+          prerelease: ${{ github.event.inputs.prerelease == 'true' }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*.tar.gz

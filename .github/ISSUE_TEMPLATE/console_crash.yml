@@ -1,0 +1,123 @@
+name: Console crash or kernel panic
+description: Report a PS4/PS5 hard crash, kernel panic, or unsafe payload behavior.
+title: "[Crash]: "
+labels: ["crash", "payload", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for console hangs, hard crashes, kernel panics, payload exits, or terminal sessions that make the console unstable. PSXTerm's PS4/PS5 runtime paths are experimental and not yet hardware validated, so this feedback is essential.
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - PS5
+        - PS4
+        - Host payload
+    validations:
+      required: true
+
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware / environment
+      placeholder: "Console firmware, jailbreak/homebrew environment, payload loader"
+    validations:
+      required: true
+
+  - type: input
+    id: build
+    attributes:
+      label: PSXTerm build
+      description: Release tag, commit SHA, branch, and whether it is a local/payload/release build.
+      placeholder: "main@abcdef0, local payload build"
+    validations:
+      required: true
+
+  - type: textarea
+    id: session
+    attributes:
+      label: Session setup
+      description: How the session was started, including the tty backend and whether external execution was involved.
+      placeholder: |
+        Daemon flags:
+        TTY backend (auto / pty / pipe):
+        Client version / OS:
+        Session id / number of sessions:
+
+  - type: dropdown
+    id: operation
+    attributes:
+      label: Operation that triggered the crash
+      options:
+        - Payload load / startup
+        - Connect / HELLO handshake
+        - OPEN / shell prompt
+        - psh built-in command
+        - External ELF execution
+        - RESIZE
+        - SIGINT / Ctrl+C / Ctrl+D
+        - Second concurrent session
+        - Client disconnect / daemon shutdown
+        - TTY probe (psxterm-ttyprobe)
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: target
+    attributes:
+      label: Command and target
+      description: Include the exact command line, session cwd, and the ELF path and arguments when external execution is involved.
+      placeholder: |
+        Command line:
+        Session cwd:
+        ELF path / arguments:
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Exact reproduction path
+      description: Start from payload launch and include every client action.
+      placeholder: |
+        1. Build payload with ...
+        2. Deploy using ...
+        3. Start psxtermd with ...
+        4. Connect from ...
+        5. Run ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: crash_behavior
+    attributes:
+      label: Crash behavior
+      description: Describe the visible console state, daemon logs, UART/serial output, client output, and whether the console reboots.
+      placeholder: |
+        Console state:
+        Daemon/client log:
+        Reboot required:
+        Frequency:
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Paste `psxtermd -v` output, client output, `psxterm-ttyprobe` output, screenshots, or crash dumps.
+      render: text
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety checks
+      options:
+        - label: I can reproduce this on an offline/local setup.
+          required: true
+        - label: I did not use this against online services or multiplayer sessions.
+          required: true
+        - label: I am willing to retest with a single session, a different tty backend, or a diagnostic build if requested.
+          required: true

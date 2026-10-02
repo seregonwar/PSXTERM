@@ -1,0 +1,47 @@
+name: Documentation
+description: Report missing, broken, or unclear PSXTerm documentation.
+title: "[Docs]: "
+labels: ["documentation", "needs-triage"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Documentation area
+      options:
+        - README - overview and status
+        - README - build instructions
+        - README - running and client usage
+        - docs/IMPLEMENTATION.md
+        - Protocol reference (include/psxterm/protocol.h)
+        - psh builtins
+        - PS4 / PS5 platform notes
+        - CI / release workflows
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: issue
+    attributes:
+      label: Documentation issue
+      description: Describe missing sections, incorrect commands, stale status claims, broken links, or unclear wording.
+      placeholder: "File/section, current text, expected text"
+    validations:
+      required: true
+
+  - type: textarea
+    id: files
+    attributes:
+      label: Affected files or anchors
+      placeholder: |
+        README.md#building
+        docs/IMPLEMENTATION.md
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      value: |
+        - [ ] The commands in the affected section were executed as written
+        - [ ] Relative links in the affected file resolve
+        - [ ] Status claims still match HARDWARE TEST REQUIRED markers

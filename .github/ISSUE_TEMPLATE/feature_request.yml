@@ -1,0 +1,69 @@
+name: Feature request
+description: Propose a PSXTerm capability or workflow improvement.
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests should describe a legitimate homebrew, debugging, research, or offline development workflow. PSXTerm is explicitly not an SSH server, not a GUI application, and does not port large external runtimes.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Protocol - PTTY/1
+        - Core server / sessions
+        - psh shell / builtins
+        - TTY backends (PTY / PipeTTY)
+        - External execution
+        - PS5 platform
+        - PS4 platform
+        - Host client
+        - Build / CI / release
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow or problem
+      description: What are you trying to do, and where does the current tooling slow you down?
+      placeholder: "I want to ... because ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the user-facing behavior, protocol shape, or build/release change.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Mention existing workarounds, related tools, or why the current workflow is not enough.
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: How should it be verified?
+      description: List expected tests, manual console checks, or documentation updates. Remember that console behaviour cannot be claimed without hardware testing.
+      placeholder: |
+        - Host unit test:
+        - Host integration test:
+        - PS4/PS5 manual check:
+        - Documentation:
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Use scope
+      options:
+        - label: This request is not for online cheating, piracy, unauthorized access, or service disruption.
+          required: true
