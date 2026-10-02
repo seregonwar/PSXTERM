@@ -17,3 +17,10 @@ void psx_log(psx_log_level_t level, const char *fmt, ...)
 #define PSX_LOGW(...) psx_log(PSX_LOG_WARN, __VA_ARGS__)
 #define PSX_LOGI(...) psx_log(PSX_LOG_INFO, __VA_ARGS__)
 #define PSX_LOGD(...) psx_log(PSX_LOG_DEBUG, __VA_ARGS__)
+
+/*
+ * User-facing notifications: the handful of lifecycle events an operator
+ * needs (start, port, instance replacement, sessions, failures, shutdown).
+ * Always prefixed, always concise - never per-frame or per-byte noise.
+ */
+#define PSX_NOTIFY(...) psx_log(PSX_LOG_INFO, "PSXTERM: " __VA_ARGS__)

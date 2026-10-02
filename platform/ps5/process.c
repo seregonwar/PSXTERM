@@ -682,12 +682,18 @@ build_payload_args(pid_t pid)
 
     if((buf = pt_mmap(pid, 0, PAGE_SIZE, PROT_READ | PROT_WRITE,
                       MAP_ANONYMOUS | MAP_PRIVATE, -1, 0)) == -1) {
+        PSX_LOGE("ps5: args: pt_mmap failed");
         return 0;
     }
 
+    PSX_LOGI("ps5: args: page 0x%lx", (unsigned long)buf);
+
     if((master_sock = pt_socket(pid, AF_INET6, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
+        PSX_LOGE("ps5: args: master socket failed");
         return 0;
     }
+
+    PSX_LOGI("ps5: args: master socket %d", master_sock);
 
     pt_setint(pid, buf + 0x00, 20);
     pt_setint(pid, buf + 0x04, IPPROTO_IPV6);
@@ -698,12 +704,18 @@ build_payload_args(pid_t pid)
 
     if(pt_setsockopt(pid, master_sock, IPPROTO_IPV6, IPV6_2292PKTOPTIONS, buf,
                      24)) {
+        PSX_LOGE("ps5: args: master setsockopt failed");
         return 0;
     }
 
+    PSX_LOGI("ps5: args: master options set");
+
     if((victim_sock = pt_socket(pid, AF_INET6, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
+        PSX_LOGE("ps5: args: victim socket failed");
         return 0;
     }
+
+    PSX_LOGI("ps5: args: victim socket %d", victim_sock);
 
     pt_setint(pid, buf + 0x00, 0);
     pt_setint(pid, buf + 0x04, 0);
@@ -712,20 +724,52 @@ build_payload_args(pid_t pid)
     pt_setint(pid, buf + 0x10, 0);
 
     if(pt_setsockopt(pid, victim_sock, IPPROTO_IPV6, IPV6_PKTINFO, buf, 20)) {
+        PSX_LOGE("ps5: args: victim setsockopt failed");
         return 0;
     }
+
+    PSX_LOGI("ps5: args: victim options set");
 
     if(kernel_overlap_sockets(pid, master_sock, victim_sock)) {
+        PSX_LOGE("ps5: args: kernel_overlap_sockets failed");
         return 0;
     }
 
-    if(pt_call(pid, pt_resolve(pid, NID_PIPE), (uint64_t)(uintptr_t)&pipe_fds) !=
-       0) {
-        return 0;
+    PSX_LOGI("ps5: args: sockets overlapped, creating pipe");
+
+    /*
+     * The pipe() call runs inside the victim, so its output buffer must be a
+     * victim address: handing it a daemon address makes the callee write into
+     * an address it cannot reach and the single-step loop never unwinds.
+     *
+     * The runtime uses these two descriptors for its own stdio, and nothing
+     * on this side relays them yet, which is why libc stdio from a spawned
+     * payload is still invisible while raw descriptor writes reach the
+     * session. Pointing them at 0/1 instead makes the runtime block on the
+     * first read, so the private pipe stays for now.
+     */
+    {
+        intptr_t victim_fds = buf + 0x400;
+
+        if(pt_call(pid, pt_resolve(pid, NID_PIPE), (uint64_t)victim_fds) != 0) {
+            PSX_LOGE("ps5: args: pipe call failed");
+            return 0;
+        }
+
+        pipe_fds[0] = -1;
+        pipe_fds[1] = -1;
+
+        if(pt_copyout(pid, victim_fds, pipe_fds, sizeof(pipe_fds))) {
+            PSX_LOGE("ps5: args: cannot read the created pipe fds");
+            return 0;
+        }
     }
+
+    PSX_LOGI("ps5: args: pipe %d,%d", pipe_fds[0], pipe_fds[1]);
 
     kpipe_addr = kernel_get_proc_file(pid, pipe_fds[0]);
     if(!kpipe_addr) {
+        PSX_LOGE("ps5: args: kernel_get_proc_file failed");
         return 0;
     }
 
@@ -1159,32 +1203,32 @@ psx_platform_spawn(const psx_spawn_options_t *options,
 
     /*
      * The reference loader builds a payload-args blob (UDP socket pair, an
-     * in-victim pipe and the kernel data base) for payloads that speak that
-     * ABI. Ours is self-contained - it opens its own listener and logs to
-     * klog - and building those args stalls this firmware, so it is opt-in.
+     * in-victim pipe and the kernel data base) and SDK payloads depend on it:
+     * their stdio runs through those handles, so a payload started without it
+     * stays alive but never reaches its own code. On by default, switchable
+     * off with PSXTERM_PS5_PAYLOAD_ARGS=0.
      */
-    if(getenv("PSXTERM_PS5_PAYLOAD_ARGS") != NULL) {
-        if(!(args = build_payload_args(pid))) {
-            PSX_LOGW("ps5: payload arguments unavailable, starting without");
-        }
-    } else {
-        /*
-         * SDK payloads read their arguments from rdi; a NULL there leaves the
-         * process alive but unable to start. The full reference ABI needs a
-         * UDP socket pair and an in-victim pipe, which stall this firmware, so
-         * hand over a zeroed page instead of nothing at all.
-         */
-        intptr_t page = pt_mmap(pid, 0, PAGE_SIZE, PROT_READ | PROT_WRITE,
-                                MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    {
+        const char *args_opt = getenv("PSXTERM_PS5_PAYLOAD_ARGS");
+        bool want_args = args_opt == NULL || args_opt[0] != '0';
 
-        if(page == -1) {
-            PSX_LOGW("ps5: minimal payload args page unavailable (%s)",
-                     strerror(errno));
-            args = 0;
+        if(want_args && (args = build_payload_args(pid))) {
+            PSX_LOGI("ps5: payload args: reference ABI at 0x%lx",
+                     (unsigned long)args);
         } else {
-            args = page;
-            PSX_LOGI("ps5: payload args: minimal page 0x%lx",
-                     (unsigned long)page);
+            intptr_t page = pt_mmap(pid, 0, PAGE_SIZE, PROT_READ | PROT_WRITE,
+                                    MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+
+            if(page == -1) {
+                PSX_LOGW("ps5: minimal payload args page unavailable (%s)",
+                         strerror(errno));
+                args = 0;
+            } else {
+                args = page;
+                PSX_LOGW("ps5: payload args: falling back to a zeroed page "
+                         "0x%lx",
+                         (unsigned long)page);
+            }
         }
     }
 

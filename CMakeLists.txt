@@ -84,6 +84,12 @@ add_executable(cli_test tools/cli_test.c)
 if(NOT PSXTERM_PLATFORM STREQUAL "host")
   set_target_properties(cli_test PROPERTIES SUFFIX ".elf")
 
+  # hello: minimal write-and-exit probe for the spawn path. Its silence or
+  # speech separates "payload never reached its entry" from "stdio not
+  # connected" during bring-up.
+  add_executable(hello tools/hello.c)
+  set_target_properties(hello PROPERTIES SUFFIX ".elf")
+
   # pslist: PS5 bring-up helper that lists processes through sysctl.
   if(PSXTERM_PLATFORM STREQUAL "ps5")
     add_executable(pslist tools/pslist.c)

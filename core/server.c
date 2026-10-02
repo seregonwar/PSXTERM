@@ -125,8 +125,8 @@ handshake_hello(psx_server_t *server, psx_session_t *session,
     }
 
     session->state = PSX_SESSION_HANDSHAKING;
-    PSX_LOGI("session %u: client '%s' connected", session->id,
-             session->client_name);
+    PSX_NOTIFY("session %u: client \"%s\" connected", session->id,
+               session->client_name);
 
     return send_hello_ack(session->sock_fd, PTTY_ACK_OK);
 }
@@ -320,8 +320,8 @@ handshake_attach(psx_server_t *server, psx_session_t *session,
         return PSX_SESSION_FRAME_ERROR;
     }
 
-    PSX_LOGI("session %u: client '%s' attached", target->id,
-             target->client_name[0] ? target->client_name : "unknown");
+    PSX_NOTIFY("session %u: client \"%s\" attached", target->id,
+               target->client_name[0] ? target->client_name : "unknown");
 
     return PSX_SESSION_FRAME_REPLACED;
 }
@@ -377,7 +377,7 @@ static void
 server_session_remove(psx_server_t *server, psx_session_t *session,
                       const char *reason)
 {
-    PSX_LOGI("session %u: closed (%s)", session->id, reason);
+    PSX_NOTIFY("session %u: closed (%s)", session->id, reason);
     psx_session_manager_remove(&server->sessions, session);
 }
 
@@ -459,7 +459,7 @@ server_tick(psx_server_t *server)
 
         /* A client asked for an administrative shutdown. */
         if(session->shutdown_requested) {
-            PSX_LOGI("shutdown requested by a client");
+            PSX_NOTIFY("shutdown requested by a client");
             g_shutdown = 1;
             break;
         }
@@ -624,8 +624,8 @@ server_loop(psx_server_t *server)
                                            sizeof(drain));
 
                         if(got > 0) {
-                            PSX_LOGI("shutdown requested (signal %u)",
-                                     (unsigned)drain[0]);
+                            PSX_NOTIFY("shutdown requested (signal %u)",
+                                       (unsigned)drain[0]);
                         }
                         g_shutdown = 1;
                     }
@@ -825,9 +825,12 @@ psx_server_run(const psx_server_config_t *config)
 
     PSX_LOGI("PSXTerm %s (%s) listening on %s:%u", PSXTERM_VERSION_STRING,
              psx_platform_name(), config->bind_addr, (unsigned)config->port);
+    PSX_NOTIFY("started on port %u (%s, protocol %s, version %s)",
+               (unsigned)config->port, psx_platform_name(),
+               PSXTERM_PROTOCOL_NAME, PSXTERM_VERSION_STRING);
 
     if(config->auth_mode == PSX_AUTH_TOKEN) {
-        PSX_LOGI("authentication: shared token");
+        PSX_NOTIFY("authentication: shared token required");
     } else {
         PSX_LOGW("authentication: DISABLED (insecure development mode) - "
                  "do not expose this port to untrusted networks");
@@ -1042,6 +1045,10 @@ main(int argc, char **argv)
 
     if(parse_args(argc, argv, &config, &doctor, &json) < 0) {
         return 2;
+    }
+
+    if(!doctor) {
+        psx_log(PSX_LOG_INFO, "PSXTERM by SeregonWar started");
     }
 
     if(!psx_platform_init()) {

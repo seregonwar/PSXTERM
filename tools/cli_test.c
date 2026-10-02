@@ -25,6 +25,16 @@ main(int argc, char **argv)
 {
     char line[128];
 
+    /*
+     * On a console the standard output is a socket, not a terminal (there is
+     * no /dev/ptmx), so libc would fully buffer it and nothing would be
+     * visible until the buffer fills or the process exits. This test target
+     * makes its own output immediate, exactly like any payload that wants to
+     * be seen on a console has to.
+     */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
     printf("cli_test: argc=%d\n", argc);
     for(int i = 0; i < argc; i++) {
         printf("argv[%d]=%s\n", i, argv[i]);

@@ -156,8 +156,8 @@ psx_privilege_raise(void)
         return false;
     }
 
-    PSX_LOGI("privilege: sandbox escaped (root vnode 0x%lx)",
-             (unsigned long)root_vnode);
+    PSX_NOTIFY("privilege: sandbox escaped (root vnode 0x%lx)",
+               (unsigned long)root_vnode);
 
     return true;
 }

@@ -119,7 +119,7 @@ terminate_process(int32_t pid)
         return false;
     }
 
-    PSX_LOGI("instance: sending SIGTERM to pid %d", pid);
+    PSX_NOTIFY("replacing previous instance: SIGTERM to pid %d", pid);
 
     if(kill((pid_t)pid, SIGTERM) != 0) {
         PSX_LOGW("instance: SIGTERM to pid %d failed: %s", pid,
@@ -130,7 +130,7 @@ terminate_process(int32_t pid)
     for(int waited = 0; waited < PSX_INSTANCE_TERM_WAIT_MS;
         waited += PSX_INSTANCE_POLL_MS) {
         if(!process_alive(pid)) {
-            PSX_LOGI("instance: pid %d exited", pid);
+            PSX_NOTIFY("previous instance pid %d exited, port released", pid);
             return true;
         }
         sleep_ms(PSX_INSTANCE_POLL_MS);
@@ -142,7 +142,7 @@ terminate_process(int32_t pid)
     for(int waited = 0; waited < PSX_INSTANCE_TERM_WAIT_MS;
         waited += PSX_INSTANCE_POLL_MS) {
         if(!process_alive(pid)) {
-            PSX_LOGI("instance: pid %d killed", pid);
+            PSX_NOTIFY("previous instance pid %d killed, port released", pid);
             return true;
         }
         sleep_ms(PSX_INSTANCE_POLL_MS);
@@ -230,7 +230,7 @@ psx_instance_claim(void)
            find_process_name(recorded_pid, recorded_name,
                              sizeof(recorded_name)) &&
            strcmp(recorded_name, own) == 0) {
-            PSX_LOGI("instance: previous instance pid %d recorded in %s",
+            PSX_NOTIFY("previous instance pid %d recorded in %s",
                      recorded_pid, path);
             replaced = terminate_process(recorded_pid);
         } else {
