@@ -165,11 +165,30 @@ Ordered by the hardware bring-up plan; nothing below claims console results.
   suite, ASan/UBSan jobs and payload jobs that build with the official
   PS4/PS5 SDK releases; docs and release workflows. Host jobs are exercised
   locally, GitHub-hosted runs are pending the first push.
+* **Capability negotiation**: IMPLEMENTED, HOST TESTED. `PTTY_MSG_CAPS`
+  advertises REAL_PTY/PIPE_TTY/EXEC/JOB_CONTROL/JSON_DIAGNOSTICS/
+  SESSION_RESUME/FILE_TRANSFER from runtime state; nothing is advertised that
+  the process cannot actually do (EXEC follows the process backend,
+  JOB_CONTROL requires a real PTY, COMPRESSION is never advertised).
+* **Backpressure**: IMPLEMENTED, HOST TESTED. Output bound re-checked per
+  chunk; new input bound with a high watermark that stops socket reads so TCP
+  backpressure reaches the client; queued input for a dead process is
+  discarded and counted. Integration tests assert bounded daemon RSS under
+  input and output floods.
+* **Persistent sessions**: IMPLEMENTED, HOST TESTED. DETACHED state,
+  DETACH/ATTACH/ATTACH_OK/ATTACH_FAIL/SESSION_INFO, random resume tokens
+  (constant-time compared, never logged), bounded 256 KiB scrollback with an
+  explicit truncation notice, SESSIONS list, `--detached-timeout` reclamation
+  and `--no-persist`.
+* **File transfer**: IMPLEMENTED, HOST TESTED. FILE_OPEN/OPEN_OK/DATA/SEEK/
+  CLOSE/RESULT/STAT, streaming in both directions, uploads through a unique
+  temporary file with size validation, fsync and atomic rename, cleanup on
+  every failure path, and defensive path parsing (empty, embedded NUL,
+  oversized). `psxterm push|pull|install`.
 
-Deferred by the plan until hardware bring-up succeeds: session
-detach/attach/resume, native file transfer, capability negotiation,
-challenge-response authentication, shell history/completion, job control and
-pipelines.
+Not yet implemented (next phases, in the plan's order): challenge-response
+authentication, psh history/completion/cursor editing, job control, pipelines
+and redirection, and fuzzing targets for the new parsers.
 
 ## Known limitations
 

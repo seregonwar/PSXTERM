@@ -44,6 +44,14 @@ Terminology follows the project's strict rules:
 | PS4/PS5 filesystem preparation | IMPLEMENTED, BUILDS FOR PS4/PS5, HARDWARE TEST REQUIRED |
 | Structured diagnostics + spawn stages | IMPLEMENTED, HOST TESTED |
 | `psxterm doctor` (local and remote, `--json`) | IMPLEMENTED, HOST TESTED |
+| Capability negotiation (`PTTY_MSG_CAPS`) | IMPLEMENTED, HOST TESTED |
+| Backpressure bounds (input + output queues) | IMPLEMENTED, HOST TESTED |
+| Persistent sessions (detach / attach / resume, bounded scrollback) | IMPLEMENTED, HOST TESTED |
+| File transfer (push / pull / install, atomic uploads) | IMPLEMENTED, HOST TESTED |
+| Challenge-response authentication | NOT IMPLEMENTED (shared token only) |
+| psh history / completion / cursor editing | NOT IMPLEMENTED |
+| psh pipelines and redirection | NOT IMPLEMENTED |
+| Job control (jobs/fg/bg) | NOT IMPLEMENTED |
 | Hardware bring-up guide | WRITTEN ([docs/HARDWARE_BRINGUP.md](docs/HARDWARE_BRINGUP.md)) |
 | CI: host build/tests, ASan/UBSan, PS4/PS5 SDK payload jobs | IMPLEMENTED |
 | Client on Windows | UNSUPPORTED (protocol layer is portable) |
@@ -112,7 +120,18 @@ psxterm 192.168.1.50 -p 2323 -t SECRET
 psxterm 192.168.1.50 -e "uname"         # run one command, exit with its status
 psxterm doctor 192.168.1.50             # remote diagnostics
 psxterm doctor --json 192.168.1.50      # machine-readable report
+psxterm sessions 192.168.1.50           # list sessions (running/detached)
+psxterm attach 192.168.1.50 3 --resume <token>
+psxterm push 192.168.1.50 ./tool.elf /data/psxterm/bin/tool.elf
+psxterm pull 192.168.1.50 /data/psxterm/log.txt ./log.txt
+psxterm install 192.168.1.50 ./tool.elf  # -> /data/psxterm/bin/tool.elf
 ```
+
+Inside a session, **Ctrl+]** detaches: the shell, its cwd, environment and
+foreground process keep running, output is buffered in a bounded scrollback
+(oldest bytes dropped, reported on reattach), and `attach --resume` resumes it
+with the session's resume token. A dropped connection behaves like a detach;
+`--no-persist` restores destroy-on-disconnect.
 
 `doctor` pings the daemon, then reports platform, filesystem, TTY, session and
 process-execution checks, running the controlled `cli_test` target through the
@@ -159,11 +178,13 @@ expose the daemon to untrusted networks while authentication is disabled.
 
 * 8 host unit suites via CTest (protocol, parser, env, registry, session,
   tty, shell, diagnostics).
-* 24 host integration tests driving a real daemon with an independent Python
+* 40 host integration tests driving a real daemon with an independent Python
   implementation of PTTY/1, covering malformed input, authentication, session
   limits, resize, signals, multi-session isolation, timeouts, the doctor
-  command (human, JSON, busy session, client binary) and a disconnect/fd-leak
-  stress loop.
+  command (human, JSON, busy session, client binary), capabilities,
+  backpressure floods with bounded-RSS assertions, detach/attach/resume with
+  scrollback truncation, file transfer (roundtrip, atomicity, path safety,
+  client binary) and a disconnect/fd-leak stress loop.
 * `cli_test` is the controlled external-execution target (argv, environment,
   `isatty`, window size, stdin, stdout/stderr, exit code 7).
 

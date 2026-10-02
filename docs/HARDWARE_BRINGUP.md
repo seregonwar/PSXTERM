@@ -152,6 +152,21 @@ ps5:~ $ /data/psxterm/bin/cli_test alpha "beta gamma"
 Expected: argv, environment, `isatty` results, the stdin line read back, a
 message on stderr, and exit status `7` (reported as `[exit 7]`).
 
+### Step 6 - remote workflows
+
+Once a session works, the transport features can be exercised too:
+
+```console
+psxterm push 192.168.1.50 ./cli_test.elf /data/psxterm/bin/cli_test.elf
+psxterm sessions 192.168.1.50                 # running/detached sessions
+# Ctrl+] inside a session detaches it; the shell keeps running
+psxterm attach 192.168.1.50 <id> --resume <token>
+psxterm pull 192.168.1.50 /data/psxterm/log.txt ./log.txt
+```
+
+If a push reports a size mismatch, no partial file is published: the daemon
+removes its temporary upload and reports the error.
+
 ## 5. Failure triage
 
 Keep bring-up surgical: fix the layer the report points at, not the whole
