@@ -184,16 +184,6 @@ pt_setint(pid_t pid, intptr_t addr, int val)
     return pt_copyin(pid, &val, addr, sizeof(val));
 }
 
-static long
-pt_getlong(pid_t pid, intptr_t addr)
-{
-    long val = 0;
-
-    pt_copyout(pid, addr, &val, sizeof(val));
-
-    return val;
-}
-
 static intptr_t
 pt_resolve(pid_t pid, const char *nid)
 {
@@ -720,7 +710,7 @@ psx_platform_spawn(const psx_spawn_options_t *options)
     intptr_t args;
     intptr_t brkpoint;
     uint8_t original_byte;
-    void *stack;
+    uint8_t *stack;
     pid_t pid;
     pid_t mypid = getpid();
     int stdio_fd;

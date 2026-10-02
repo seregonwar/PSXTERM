@@ -538,7 +538,7 @@ psx_platform_spawn(const psx_spawn_options_t *options)
     uint8_t *elf;
     size_t elf_size = 0;
     intptr_t entry;
-    void *stack;
+    uint8_t *stack;
     pid_t pid;
     pid_t mypid = getpid();
     int stdio_fd;
