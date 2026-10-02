@@ -1,3 +1,4 @@
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -5,7 +6,57 @@
 #include <sys/utsname.h>
 #include <unistd.h>
 
+#include "psxterm/instance.h"
 #include "psxterm/platform.h"
+
+/* Development-host process snapshot (Linux /proc; used by instance tests). */
+int
+psx_platform_list_processes(psx_proc_entry_t *entries, size_t max_entries)
+{
+    DIR *dir;
+    struct dirent *entry;
+    size_t count = 0;
+
+    if(!entries || max_entries == 0) {
+        return -1;
+    }
+
+    if(!(dir = opendir("/proc"))) {
+        return -1;
+    }
+
+    while((entry = readdir(dir)) && count < max_entries) {
+        char path[64];
+        char line[64];
+        int pid = atoi(entry->d_name);
+        FILE *fp;
+
+        if(pid <= 0) {
+            continue;
+        }
+
+        snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+        if(!(fp = fopen(path, "r"))) {
+            continue;
+        }
+
+        line[0] = '\0';
+        if(!fgets(line, sizeof(line), fp)) {
+            fclose(fp);
+            continue;
+        }
+        fclose(fp);
+        line[strcspn(line, "\r\n")] = '\0';
+
+        entries[count].pid = pid;
+        snprintf(entries[count].name, sizeof(entries[count].name), "%s", line);
+        count++;
+    }
+
+    closedir(dir);
+
+    return (int)count;
+}
 
 bool
 psx_platform_init(void)

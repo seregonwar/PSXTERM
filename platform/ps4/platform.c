@@ -5,8 +5,24 @@
 #include <ps4/kernel.h>
 #include <ps4/klog.h>
 
+#include "psxterm/instance.h"
 #include "psxterm/log.h"
 #include "psxterm/platform.h"
+
+/*
+ * PS4 process enumeration is not implemented yet: the kinfo_proc layout of
+ * this firmware is unverified, and guessing it could make the daemon signal
+ * unrelated processes. PS4 therefore relies on the pid file alone
+ * (HARDWARE TEST REQUIRED for the replacement path).
+ */
+int
+psx_platform_list_processes(psx_proc_entry_t *entries, size_t max_entries)
+{
+    (void)entries;
+    (void)max_entries;
+
+    return 0;
+}
 
 /* PSXTerm on PS4: payload-side platform primitives. */
 

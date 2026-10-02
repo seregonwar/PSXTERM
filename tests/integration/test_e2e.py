@@ -81,9 +81,13 @@ class Daemon:
             os.environ.get("PSXTERM_SCRATCH", "/tmp"),
             "psxtermd-test-%d.log" % os.getpid())
         self.log_file = open(self.log_path, "wb")
+        env = dict(os.environ)
+        env["PSXTERM_PID_FILE"] = os.path.join(
+            os.environ.get("PSXTERM_SCRATCH", "/tmp"),
+            "psxtermd-test-%d.pid" % self.port)
         self.proc = subprocess.Popen(
             [os.path.join(BUILD, "psxtermd"), "-p", str(self.port)] + list(args),
-            stdout=subprocess.DEVNULL, stderr=self.log_file)
+            stdout=subprocess.DEVNULL, stderr=self.log_file, env=env)
         if wait:
             self.wait_ready()
 

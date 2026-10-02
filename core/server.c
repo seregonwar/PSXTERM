@@ -10,9 +10,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "psxterm/diag.h"
+#include "psxterm/instance.h"
 #include "psxterm/log.h"
 #include "psxterm/platform.h"
 #include "psxterm/protocol.h"
@@ -782,9 +784,43 @@ psx_server_run(const psx_server_config_t *config)
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
+    /* Replace a previously running daemon before taking the port. */
+    psx_instance_claim();
+
     if(server_listen(&server) < 0) {
-        rc = -1;
-        goto out;
+        /*
+         * The port may still be held by an instance that predates the pid
+         * file (first upgrade on a console). Replace same-name siblings and
+         * retry, so a console reboot is never required.
+         */
+        if(errno == EADDRINUSE) {
+            PSX_LOGW("port %u is busy; looking for a previous PSXTerm instance",
+                     (unsigned)config->port);
+
+            if(psx_instance_replace_siblings() > 0) {
+                for(int attempt = 0; attempt < 15; attempt++) {
+                    struct timespec pause = {.tv_sec = 0,
+                                             .tv_nsec = 200 * 1000 * 1000};
+
+                    nanosleep(&pause, NULL);
+
+                    if(server_listen(&server) == 0) {
+                        PSX_LOGI("port %u acquired after replacing the "
+                                 "previous instance",
+                                 (unsigned)config->port);
+                        break;
+                    }
+                    if(errno != EADDRINUSE) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if(server.listen_fd < 0) {
+            rc = -1;
+            goto out;
+        }
     }
 
     PSX_LOGI("PSXTerm %s (%s) listening on %s:%u", PSXTERM_VERSION_STRING,
@@ -812,6 +848,8 @@ out:
     if(server.listen_fd >= 0) {
         close(server.listen_fd);
     }
+
+    psx_instance_release();
     if(server.signal_pipe[0] >= 0) {
         close(server.signal_pipe[0]);
         close(server.signal_pipe[1]);

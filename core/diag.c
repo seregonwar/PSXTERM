@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "psxterm/diag.h"
+#include "psxterm/instance.h"
 #include "psxterm/log.h"
 #include "psxterm/platform.h"
 #include "psxterm/process.h"
@@ -429,6 +430,26 @@ check_platform(psx_diag_report_t *report)
         } else {
             psx_diag_add(group, "clock", PSX_DIAG_FAIL, 0,
                          "does not advance (timeouts would never fire)");
+        }
+    }
+
+    /*
+     * Instance replacement depends on reading our own payload name; a
+     * system-like name disables it on purpose, so report what we see.
+     */
+    {
+        char name[64];
+
+        psx_instance_own_name(name, sizeof(name));
+
+        if(name[0] && strncmp(name, "Sce", 3) != 0) {
+            psx_diag_add(group, "process name", PSX_DIAG_PASS, 0, "%s", name);
+        } else if(name[0]) {
+            psx_diag_add(group, "process name", PSX_DIAG_WARN, 0,
+                         "%s (system-like: replacement disabled)", name);
+        } else {
+            psx_diag_add(group, "process name", PSX_DIAG_UNKNOWN, 0,
+                         "process enumeration unavailable");
         }
     }
 }

@@ -44,6 +44,7 @@ set(PSXTERM_CORE_SOURCES
   core/tty.c
   core/process.c
   core/session.c
+  core/instance.c
   core/diag.c
   shell/shell.c
   shell/parser.c
@@ -82,6 +83,12 @@ target_link_libraries(psxterm-ttyprobe PRIVATE psxterm_core)
 add_executable(cli_test tools/cli_test.c)
 if(NOT PSXTERM_PLATFORM STREQUAL "host")
   set_target_properties(cli_test PROPERTIES SUFFIX ".elf")
+
+  # pslist: PS5 bring-up helper that lists processes through sysctl.
+  if(PSXTERM_PLATFORM STREQUAL "ps5")
+    add_executable(pslist tools/pslist.c)
+    set_target_properties(pslist PROPERTIES SUFFIX ".elf")
+  endif()
 endif()
 
 # Host client: POSIX terminals only, not part of the console payloads.

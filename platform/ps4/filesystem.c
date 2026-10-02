@@ -37,23 +37,22 @@ ensure_dir(const char *path)
 bool
 psx_fs_prepare(void)
 {
-    if(access("/data", W_OK) == 0) {
-        return true;
-    }
-
-    if(kernel_set_proc_rootdir(getpid(), KERNEL_ADDRESS_ROOTVNODE) != 0 ||
-       kernel_set_proc_jaildir(getpid(), KERNEL_ADDRESS_ROOTVNODE) != 0 ||
-       kernel_set_ucred_prison(getpid(), KERNEL_ADDRESS_PRISON0) != 0 ||
-       kernel_set_ucred_uid(getpid(), 0) != 0) {
-        PSX_LOGW("fs: privilege raise failed: %s", strerror(errno));
-        return false;
-    }
-
     if(access("/data", W_OK) != 0) {
-        PSX_LOGW("fs: /data still not writable; using the sandboxed root");
-        return false;
+        if(kernel_set_proc_rootdir(getpid(), KERNEL_ADDRESS_ROOTVNODE) != 0 ||
+           kernel_set_proc_jaildir(getpid(), KERNEL_ADDRESS_ROOTVNODE) != 0 ||
+           kernel_set_ucred_prison(getpid(), KERNEL_ADDRESS_PRISON0) != 0 ||
+           kernel_set_ucred_uid(getpid(), 0) != 0) {
+            PSX_LOGW("fs: privilege raise failed: %s", strerror(errno));
+            return false;
+        }
+
+        if(access("/data", W_OK) != 0) {
+            PSX_LOGW("fs: /data still not writable; using the sandboxed root");
+            return false;
+        }
     }
 
+    /* Created unconditionally: the pid file lives there. */
     if(!ensure_dir("/data/psxterm")) {
         PSX_LOGW("fs: cannot create /data/psxterm: %s", strerror(errno));
         return false;

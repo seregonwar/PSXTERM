@@ -39,30 +39,31 @@ psx_fs_prepare(void)
 {
     intptr_t vnode;
 
-    if(access("/data", W_OK) == 0) {
-        return true;
-    }
-
-    if(!(vnode = kernel_get_root_vnode())) {
-        PSX_LOGW("fs: kernel_get_root_vnode unavailable; staying in the "
-                 "current sandbox");
-        return false;
-    }
-
-    if(kernel_set_proc_rootdir(getpid(), vnode) != 0 ||
-       kernel_set_proc_jaildir(getpid(), 0) != 0 ||
-       kernel_set_ucred_uid(getpid(), 0) != 0) {
-        PSX_LOGW("fs: privilege raise failed: %s", strerror(errno));
-        return false;
-    }
-
     if(access("/data", W_OK) != 0) {
-        PSX_LOGW("fs: /data still not writable; using the sandboxed root");
-        return false;
+        if(!(vnode = kernel_get_root_vnode())) {
+            PSX_LOGW("fs: kernel_get_root_vnode unavailable; staying in the "
+                     "current sandbox");
+            return false;
+        }
+
+        if(kernel_set_proc_rootdir(getpid(), vnode) != 0 ||
+           kernel_set_proc_jaildir(getpid(), 0) != 0 ||
+           kernel_set_ucred_uid(getpid(), 0) != 0) {
+            PSX_LOGW("fs: privilege raise failed: %s", strerror(errno));
+            return false;
+        }
+
+        if(access("/data", W_OK) != 0) {
+            PSX_LOGW("fs: /data still not writable; using the sandboxed root");
+            return false;
+        }
     }
 
-    /* PSXTerm home and tool directory (hardware bring-up finding: they do not
-     * exist on a fresh console and nothing else creates them). */
+    /*
+     * Created unconditionally: hardware bring-up showed that a writable /data
+     * says nothing about PSXTerm's own directories existing, and the pid file
+     * lives there.
+     */
     if(!ensure_dir("/data/psxterm")) {
         PSX_LOGW("fs: cannot create /data/psxterm: %s", strerror(errno));
         return false;
