@@ -418,6 +418,88 @@ struct ps5_spawn_context {
     int stderr_fd;
 };
 
+/*
+ * Copy an argument vector, strings included, into a shared heap arena.
+ *
+ * The child created by rfork reads this vector, and reading strings that live
+ * on the caller's stack produced garbage (hardware-verified: the child logged
+ * argc=16 with an unreadable argv[0] while a string literal in .rodata came
+ * through fine). Everything the child needs therefore lives in the arena.
+ */
+static char **
+child_copy_vector(char *const *src, size_t max, char **arena, size_t *left)
+{
+    size_t count = 0;
+    size_t need = 0;
+    char **out;
+    char *strings;
+
+    if(!src) {
+        return NULL;
+    }
+
+    while(count < max && src[count]) {
+        need += strlen(src[count]) + 1;
+        count++;
+    }
+
+    if((count + 1) * sizeof(char *) + need > *left) {
+        return NULL;
+    }
+
+    out = (char **)(void *)*arena;
+    strings = (char *)(out + count + 1);
+
+    for(size_t i = 0; i < count; i++) {
+        size_t len = strlen(src[i]) + 1;
+
+        memcpy(strings, src[i], len);
+        out[i] = strings;
+        strings += len;
+    }
+    out[count] = NULL;
+
+    *arena += (count + 1) * sizeof(char *) + need;
+    *left -= (count + 1) * sizeof(char *) + need;
+
+    return out;
+}
+
+/*
+ * Child-side breadcrumb: klog is unreliable here, so the same line also goes
+ * to a file in the writable data directory, where it can simply be pulled.
+ */
+static void
+child_note(const char *fmt, ...)
+{
+    char line[256];
+    va_list ap;
+    int len;
+    int fd;
+
+    va_start(ap, fmt);
+    len = vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+
+    if(len < 0) {
+        return;
+    }
+    if((size_t)len >= sizeof(line)) {
+        len = (int)sizeof(line) - 1;
+    }
+
+    klog_printf("%s\n", line);
+
+    fd = open("/data/psxterm/child.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if(fd >= 0) {
+        ssize_t ignored = write(fd, line, (size_t)len);
+        (void)ignored;
+        ignored = write(fd, "\n", 1);
+        (void)ignored;
+        close(fd);
+    }
+}
+
 static int
 ps5_rfork_entry(void *arg)
 {
@@ -462,6 +544,31 @@ ps5_rfork_entry(void *arg)
                 dup2(ctx->stderr_fd, STDERR_FILENO);
             }
         }
+    }
+
+    /*
+     * Report exactly what the exec will hand the console process: the
+     * payload inherits this argument vector, and a nonsense count here shows
+     * up as a nonsense argc inside the payload.
+     */
+    {
+        int argc = 0;
+        const char *first = "(none)";
+
+        while(argc < 16 && ctx->argv && ctx->argv[argc]) {
+            if(argc == 0) {
+                first = ctx->argv[0];
+            }
+            argc++;
+        }
+
+        klog_printf("psxterm: child spawn: argc=%d argv0=%s path=%s\n", argc,
+                    first, ctx->path);
+        child_note("child spawn: ctx=%lx argv=%lx argv0=%lx argc=%d first=%s",
+                   (unsigned long)(uintptr_t)ctx,
+                   (unsigned long)(uintptr_t)ctx->argv,
+                   (unsigned long)(uintptr_t)(ctx->argv ? ctx->argv[0] : NULL),
+                   argc, first);
     }
 
     execve(ctx->path, ctx->argv, ctx->envp);
@@ -1024,6 +1131,30 @@ psx_platform_spawn(const psx_spawn_options_t *options,
     ctx.argv = options->argv;
     ctx.envp = options->envp;
     ctx.path = PS5_EBOOT;
+
+    /* Hand the child its own copy of both vectors, in memory it can read. */
+    {
+        size_t arena_size = 16 * 1024;
+        char *arena = calloc(1, arena_size);
+
+        if(arena) {
+            char **argv_copy;
+            char **envp_copy;
+            size_t left = arena_size;
+
+            argv_copy = child_copy_vector(options->argv, PSX_SPAWN_MAX_ARGS,
+                                          &arena, &left);
+            envp_copy = child_copy_vector(options->envp, PSX_SPAWN_MAX_ENV,
+                                          &arena, &left);
+
+            if(argv_copy) {
+                ctx.argv = argv_copy;
+            }
+            if(envp_copy) {
+                ctx.envp = envp_copy;
+            }
+        }
+    }
     ctx.stdin_fd = options->stdin_fd;
     ctx.stdout_fd = options->stdout_fd;
     ctx.stderr_fd = options->stderr_fd;

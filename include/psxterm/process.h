@@ -5,6 +5,14 @@
 #include <sys/types.h>
 
 /*
+ * Hard bounds used when a spawn request is copied into a guaranteed
+ * NUL-terminated argument and environment vector: a caller that forgets the
+ * terminator would otherwise make the kernel read past the array.
+ */
+#define PSX_SPAWN_MAX_ARGS 64
+#define PSX_SPAWN_MAX_ENV 128
+
+/*
  * External process execution.
  *
  * The shell only ever calls psx_spawn(). Platform internals (fork/exec on the

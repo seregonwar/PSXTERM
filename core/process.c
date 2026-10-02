@@ -26,6 +26,9 @@ pid_t
 psx_spawn_ex(const psx_spawn_options_t *options, psx_spawn_failure_t *failure)
 {
     psx_spawn_failure_t local;
+    psx_spawn_options_t bounded;
+    char *argv_fixed[PSX_SPAWN_MAX_ARGS + 1];
+    char *envp_fixed[PSX_SPAWN_MAX_ENV + 1];
 
     if(!failure) {
         failure = &local;
@@ -50,7 +53,37 @@ psx_spawn_ex(const psx_spawn_options_t *options, psx_spawn_failure_t *failure)
         return -1;
     }
 
-    return psx_platform_spawn(options, failure);
+    /*
+     * Bounded, guaranteed NUL-terminated copies of argv and envp. A caller
+     * that forgets the terminator makes the kernel read past the array, and
+     * the payload starts with a nonsense argument count and garbage argument
+     * pointers (hardware-verified: argc=50 and unreadable argv strings).
+     */
+    bounded = *options;
+
+    {
+        size_t n = 0;
+
+        while(n < PSX_SPAWN_MAX_ARGS && options->argv[n]) {
+            argv_fixed[n] = options->argv[n];
+            n++;
+        }
+        argv_fixed[n] = NULL;
+        bounded.argv = argv_fixed;
+    }
+
+    if(options->envp) {
+        size_t n = 0;
+
+        while(n < PSX_SPAWN_MAX_ENV && options->envp[n]) {
+            envp_fixed[n] = options->envp[n];
+            n++;
+        }
+        envp_fixed[n] = NULL;
+        bounded.envp = envp_fixed;
+    }
+
+    return psx_platform_spawn(&bounded, failure);
 }
 
 pid_t

@@ -62,6 +62,13 @@ void psx_tty_force_backend(psx_tty_backend_t backend);
 int psx_tty_open(psx_tty_t *tty, psx_tty_backend_t backend, uint16_t rows,
                  uint16_t cols);
 
+/*
+ * Signal the end of input to whatever reads the slave side: a payload parked
+ * in a read has to see it or it never finishes. A real PTY takes the VEOF
+ * character, the pipe backends shut the write direction down.
+ */
+int psx_tty_send_eof(psx_tty_t *tty);
+
 /* Apply a new window size. No-op (but tracked) for PipeTTY. */
 int psx_tty_set_size(psx_tty_t *tty, uint16_t rows, uint16_t cols);
 

@@ -31,6 +31,23 @@ psx_tty_close(psx_tty_t *tty)
     psx_tty_init(tty);
 }
 
+int
+psx_tty_send_eof(psx_tty_t *tty)
+{
+    if(!tty || tty->master_fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if(tty->backend == PSX_TTY_BACKEND_FREEBSD_PTY) {
+        const char eof = 4; /* VEOF */
+
+        return write(tty->master_fd, &eof, 1) == 1 ? 0 : -1;
+    }
+
+    return shutdown(tty->master_fd, SHUT_WR);
+}
+
 const char *
 psx_tty_backend_name(psx_tty_backend_t backend)
 {

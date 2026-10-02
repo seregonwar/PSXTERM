@@ -928,6 +928,17 @@ diag_cli_run(const diag_cli_opts_t *opts, diag_capture_t *capture,
             psx_process_kill(capture->pid, SIGKILL);
             goto reap;
         }
+
+        /*
+         * Deliver the end of input, exactly as a client does when its own
+         * stdin closes: without it a payload parked in a read never finishes
+         * and the run looks silent. Checks that mean to keep the process
+         * running (the signal check) deliberately do not send stdin.
+         */
+        if(psx_tty_send_eof(&tty) < 0) {
+            PSX_LOGD("diagnostics: cannot signal end of input (%s)",
+                     strerror(errno));
+        }
     }
 
     start = psx_now_ms();
@@ -1117,10 +1128,35 @@ check_process(psx_diag_report_t *report)
     char cli_test[PSX_PATH_MAX];
     char searched[DIAG_DETAIL_SIZE];
     char detail[256];
-    char *const argv[] = {"cli_test", "doctor", "beta gamma", NULL};
     diag_cli_opts_t opts;
     diag_capture_t capture;
     psx_spawn_failure_t failure;
+    char **argv;
+
+    /*
+     * The argument vector lives on the heap, not on this frame: the process
+     * created for the payload only sees heap and read-only data reliably, so
+     * stack strings and a stack array reach it as garbage (hardware-verified:
+     * the payload reported argc=16 with unreadable arguments).
+     */
+    argv = calloc(4, sizeof(*argv));
+    if(!argv) {
+        skip_process_checks(group, "out of memory", true);
+        return;
+    }
+    argv[0] = strdup("cli_test");
+    argv[1] = strdup("doctor");
+    argv[2] = strdup("beta gamma");
+    argv[3] = NULL;
+
+    if(!argv[0] || !argv[1] || !argv[2]) {
+        free(argv[0]);
+        free(argv[1]);
+        free(argv[2]);
+        free(argv);
+        skip_process_checks(group, "out of memory", true);
+        return;
+    }
 
     if(!diag_locate_cli_test(cli_test, sizeof(cli_test), searched,
                              sizeof(searched))) {
@@ -1136,7 +1172,7 @@ check_process(psx_diag_report_t *report)
     memset(&failure, 0, sizeof(failure));
 
     opts.path = cli_test;
-    opts.argv = argv;
+    opts.argv = (char *const *)argv;
     opts.stdin_line = "doctor-stdin";
     opts.separate_stderr = false;
     opts.rows = 31;
@@ -1153,6 +1189,41 @@ check_process(psx_diag_report_t *report)
 
     psx_diag_add(group, "spawn", PSX_DIAG_PASS, 0, "pid %d, stage %s",
                  (int)capture.pid, psx_spawn_stage_name(failure.stage));
+
+    /* Byte counts separate "the capture is empty" from "the process never
+     * wrote", which the marker checks alone cannot tell apart. */
+    psx_diag_add(group, "captured output", PSX_DIAG_PASS, 0,
+                 "tty=%zu bytes, stderr=%zu bytes",
+                 (size_t)capture.tty_total, (size_t)capture.stderr_total);
+
+    /* An escaped sample of what actually arrived: when a marker check fails
+     * this says whether the payload wrote something else or nothing usable. */
+    {
+        char preview[160];
+        size_t n = 0;
+
+        for(size_t i = 0; i < capture.tty_len && n + 5 < sizeof(preview); i++) {
+            unsigned char c = (unsigned char)capture.tty_out[i];
+
+            if(c == '\n') {
+                preview[n++] = '\\';
+                preview[n++] = 'n';
+            } else if(c == '\r') {
+                preview[n++] = '\\';
+                preview[n++] = 'r';
+            } else if(c < 32 || c > 126) {
+                preview[n++] = '\\';
+                preview[n++] = 'x';
+                preview[n++] = (char)('0' + ((c >> 4) & 0xf));
+                preview[n++] = (char)('0' + (c & 0xf));
+            } else {
+                preview[n++] = (char)c;
+            }
+        }
+        preview[n] = '\0';
+
+        psx_diag_add(group, "capture sample", PSX_DIAG_PASS, 0, "%s", preview);
+    }
 
     add_marker_check(group, "argv", capture.tty_out, "argv[1]=doctor");
     if(strstr(capture.tty_out, "argv[2]=beta gamma")) {
