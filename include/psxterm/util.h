@@ -23,6 +23,17 @@ bool psx_parse_int(const char *s, int *out);
 int psx_path_join(char *out, size_t out_cap, const char *a, const char *b);
 
 /*
+ * Create a connected descriptor pair over the loopback interface: fds[0] and
+ * fds[1] are the two ends of one TCP connection and both are sockets.
+ *
+ * A socket pair rather than an AF_UNIX pair or a pipe, because this console
+ * kernel only imports socket-type descriptors into a hijacked process (the
+ * rdup syscall fails for other types), and because either end can be shut
+ * down in one direction without disturbing the other. Returns 0 on success.
+ */
+int psx_socket_pair(int fds[2]);
+
+/*
  * Growable byte buffer used for both framed output queues and parsing
  * scratch space. The buffer keeps a read offset so partially flushed data
  * does not need to be memmoved on every write.

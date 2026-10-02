@@ -1,12 +1,52 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "psxterm/util.h"
+
+int
+psx_socket_pair(int fds[2])
+{
+    struct sockaddr_in addr;
+    socklen_t addr_len = sizeof(addr);
+    int listener;
+
+    fds[0] = -1;
+    fds[1] = -1;
+
+    if((listener = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        return -1;
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+
+    if(bind(listener, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+       listen(listener, 1) < 0 ||
+       getsockname(listener, (struct sockaddr *)&addr, &addr_len) < 0 ||
+       (fds[0] = socket(AF_INET, SOCK_STREAM, 0)) < 0 ||
+       connect(fds[0], (struct sockaddr *)&addr, addr_len) < 0 ||
+       (fds[1] = accept(listener, NULL, NULL)) < 0) {
+        close(listener);
+        if(fds[0] >= 0) {
+            close(fds[0]);
+        }
+        fds[0] = fds[1] = -1;
+        return -1;
+    }
+
+    close(listener);
+
+    return 0;
+}
 
 uint64_t
 psx_now_ms(void)

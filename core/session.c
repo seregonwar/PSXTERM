@@ -748,14 +748,15 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
     options.envp = envp;
 
     /*
-     * NOTE (hardware, three configurations measured): the tty for all three
-     * descriptors is the configuration that works. Signalling end of input on
-     * that shared pair costs the rest of the payload's output, and a stdin
-     * pipe - even installed exactly the way the reference loader does, with
-     * the caps raised around the redirection - loses the payload's output
-     * too. The reference ecosystem only ever passes sockets here (shsrv gives
-     * its shell the client socket), so the pipe path is untested there as
-     * well; until it is understood, the verified configuration stays.
+     * NOTE (hardware, four configurations measured). Working: the tty for all
+     * three descriptors, where stdin/stdout/stderr share one fd number.
+     * Failing: any variant where stdin is a *different* descriptor - a pipe,
+     * or a socket pair - the payload then runs to completion (its own
+     * breadcrumbs say so, and its write(1) reports success) but its output
+     * never reaches the daemon, even while the first line written right after
+     * exec does appear. That asymmetry points at the redirection step, not at
+     * the descriptor type, and it is the next thing to instrument: log what
+     * each of the three installs actually did in a failing run.
      */
     (void)session->proc.stdin_fd;
     session->proc.stdin_fd = -1;
