@@ -18,6 +18,7 @@
 #include "psxterm/log.h"
 #include "psxterm/platform.h"
 #include "psxterm/protocol.h"
+#include "psxterm/runtime.h"
 #include "psxterm/server.h"
 #include "psxterm/session.h"
 #include "psxterm/shell.h"
@@ -1054,6 +1055,18 @@ main(int argc, char **argv)
     if(!psx_platform_init()) {
         PSX_LOGE("platform initialization failed");
         return 1;
+    }
+
+    /*
+     * The runtime layout is what external CLI processes expect: home, tmp,
+     * XDG locations, certificate bundle. Create it before serving, but never
+     * refuse to start because of it.
+     */
+    if(!doctor) {
+        if(!psx_runtime_prepare()) {
+            PSX_LOGW("runtime layout incomplete; external CLIs may misbehave");
+        }
+        psx_runtime_manifest_write(NULL);
     }
 
     if(doctor) {

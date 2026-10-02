@@ -46,6 +46,7 @@ set(PSXTERM_CORE_SOURCES
   core/session.c
   core/instance.c
   core/diag.c
+  core/runtime.c
   shell/shell.c
   shell/parser.c
   shell/env.c
@@ -118,6 +119,7 @@ if(PSXTERM_PLATFORM STREQUAL "host" AND NOT CMAKE_CROSSCOMPILING)
     test_tty
     test_shell
     test_diag
+    test_runtime
   )
 
   foreach(test_name ${PSXTERM_TESTS})
