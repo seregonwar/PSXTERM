@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -84,11 +85,41 @@ psx_tty_default_backend(void)
 static int
 tty_open_pipe(psx_tty_t *tty, uint16_t rows, uint16_t cols)
 {
-    int fds[2];
+    struct sockaddr_in addr;
+    socklen_t addr_len = sizeof(addr);
+    int listener = -1;
+    int fds[2] = {-1, -1};
 
-    if(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0) {
+    /*
+     * A loopback TCP pair instead of an AF_UNIX socketpair: the console
+     * kernel refuses to import AF_UNIX descriptors into a hijacked eboot
+     * process (dup2 and the rdup syscall both fail), while the reference
+     * loader hands out an accepted TCP socket and succeeds. The connection
+     * never leaves the console.
+     */
+    if((listener = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         return -1;
     }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+
+    if(bind(listener, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+       listen(listener, 1) < 0 ||
+       getsockname(listener, (struct sockaddr *)&addr, &addr_len) < 0 ||
+       (fds[0] = socket(AF_INET, SOCK_STREAM, 0)) < 0 ||
+       connect(fds[0], (struct sockaddr *)&addr, addr_len) < 0 ||
+       (fds[1] = accept(listener, NULL, NULL)) < 0) {
+        close(listener);
+        if(fds[0] >= 0) {
+            close(fds[0]);
+        }
+        return -1;
+    }
+
+    close(listener);
 
     psx_set_cloexec(fds[0], true);
     psx_set_cloexec(fds[1], true);

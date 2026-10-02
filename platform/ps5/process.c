@@ -1186,6 +1186,26 @@ psx_platform_spawn(const psx_spawn_options_t *options,
 
     stage_set(failure, PSX_SPAWN_STAGE_RUNNING, 0, NULL);
 
+    /*
+     * Give the payload a moment and record whether it survived the start:
+     * distinguishes "crashed immediately" from "running but its stdio is not
+     * connected", which is otherwise indistinguishable from the outside.
+     */
+    {
+        int status = 0;
+        struct timespec settle = {.tv_sec = 0, .tv_nsec = 200 * 1000 * 1000};
+
+        nanosleep(&settle, NULL);
+
+        if(waitpid(pid, &status, WNOHANG) == pid) {
+            PSX_LOGE("ps5: payload exited at start (status %d, exit %d, sig %d)",
+                     status, WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+                     WIFSIGNALED(status) ? WTERMSIG(status) : -1);
+        } else {
+            PSX_LOGI("ps5: payload alive after start");
+        }
+    }
+
     return pid;
 }
 
