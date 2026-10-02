@@ -20,6 +20,7 @@
 #include "psxterm/instance.h"
 #include "psxterm/log.h"
 #include "psxterm/platform.h"
+#include "psxterm/runtime.h"
 #include "psxterm/process.h"
 #include "psxterm/session.h"
 #include "psxterm/tty.h"
@@ -858,10 +859,11 @@ static int
 diag_cli_run(const diag_cli_opts_t *opts, diag_capture_t *capture,
              psx_spawn_failure_t *failure, char *error, size_t error_cap)
 {
-    static const char *const env_fixed[] = {"PSXTERM_DOCTOR=1",
-                                            "TERM=xterm-256color", NULL};
-    char path_env[PSX_PATH_MAX];
-    char *envp[4];
+    static const char *const extra_env[] = {"PSXTERM_DOCTOR=1", NULL};
+    char *runtime_env[16];
+    char *envp[24];
+    size_t runtime_env_count;
+    size_t envp_count = 0;
     psx_tty_t tty;
     psx_spawn_options_t spawn;
     psx_spawn_failure_t local_failure;
@@ -872,12 +874,6 @@ diag_cli_run(const diag_cli_opts_t *opts, diag_capture_t *capture,
 
     memset(capture, 0, sizeof(*capture));
     memset(&local_failure, 0, sizeof(local_failure));
-    snprintf(path_env, sizeof(path_env), "PATH=%s", psx_platform_default_path());
-
-    envp[0] = (char *)env_fixed[0];
-    envp[1] = (char *)env_fixed[1];
-    envp[2] = path_env;
-    envp[3] = NULL;
 
     psx_tty_init(&tty);
 
@@ -897,6 +893,25 @@ diag_cli_run(const diag_cli_opts_t *opts, diag_capture_t *capture,
         psx_set_cloexec(stderr_pipe[1], true);
         psx_set_nonblocking(stderr_pipe[0], true);
     }
+
+    /*
+     * The diagnostics run through the same environment an external CLI gets:
+     * the runtime layout first, then the markers this run needs. That is what
+     * makes the run a check of the layout too.
+     */
+    runtime_env_count = psx_runtime_environment(runtime_env, 16);
+
+    for(size_t i = 0;
+        i < runtime_env_count &&
+        envp_count + 2 < sizeof(envp) / sizeof(envp[0]); i++) {
+        envp[envp_count++] = runtime_env[i];
+    }
+    for(size_t i = 0;
+        extra_env[i] && envp_count + 1 < sizeof(envp) / sizeof(envp[0]);
+        i++) {
+        envp[envp_count++] = (char *)extra_env[i];
+    }
+    envp[envp_count] = NULL;
 
     memset(&spawn, 0, sizeof(spawn));
     spawn.path = opts->path;
@@ -1014,6 +1029,10 @@ reap:
     }
 
 out:
+    for(size_t i = 0; i < runtime_env_count; i++) {
+        free(runtime_env[i]);
+    }
+
     if(stderr_pipe[0] >= 0) {
         close(stderr_pipe[0]);
     }

@@ -52,9 +52,25 @@ bool psx_runtime_prepare(void);
  * Environment every externally spawned CLI process must receive, as
  * "KEY=VALUE" strings: HOME, TMPDIR, the XDG locations, PATH, the TLS bundle
  * variables and TERM. Writes up to max entries plus a NULL terminator into
- * out and returns the number of entries written.
+ * out and returns the number of entries written. The caller owns the
+ * strings.
  */
 size_t psx_runtime_environment(char **out, size_t max);
+
+typedef struct {
+    const char *key;
+    const char *value;
+} psx_runtime_env_t;
+
+/*
+ * The same environment in structured form, for code that has to decide how
+ * to merge each key. Pointers stay valid until the next call.
+ */
+size_t psx_runtime_env_table(psx_runtime_env_t *out, size_t max);
+
+/* Keys the runtime owns: an external CLI must never see a different HOME,
+ * TMPDIR, XDG location or certificate bundle than the runtime layout. */
+bool psx_runtime_env_is_contract(const char *key);
 
 /*
  * Write the runtime manifest (runtime.json) describing this layout. Metadata

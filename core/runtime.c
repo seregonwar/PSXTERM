@@ -161,6 +161,73 @@ psx_runtime_prepare(void)
     return true;
 }
 
+size_t
+psx_runtime_env_table(psx_runtime_env_t *out, size_t max)
+{
+    static char home_config[PSX_PATH_MAX];
+    static char data_home[PSX_PATH_MAX];
+    static char path_value[PSX_PATH_MAX];
+    size_t written = 0;
+
+    runtime_init();
+
+    if(max == 0) {
+        return 0;
+    }
+
+    psx_path_join(home_config, sizeof(home_config),
+                  psx_runtime_dir(PSX_RUNTIME_DIR_HOME), ".config");
+    psx_path_join(data_home, sizeof(data_home),
+                  psx_runtime_dir(PSX_RUNTIME_DIR_HOME), ".local/share");
+    psx_path_join(path_value, sizeof(path_value), psx_platform_bin_dir(),
+                  psx_runtime_dir(PSX_RUNTIME_DIR_BIN));
+
+#define ENTRY(key_, value_)                                                   \
+    do {                                                                      \
+        if(written < max) {                                                   \
+            out[written].key = (key_);                                        \
+            out[written].value = (value_);                                    \
+            written++;                                                        \
+        }                                                                     \
+    } while(0)
+
+    ENTRY("HOME", psx_runtime_dir(PSX_RUNTIME_DIR_HOME));
+    ENTRY("TMPDIR", psx_runtime_dir(PSX_RUNTIME_DIR_TMP));
+    ENTRY("XDG_CONFIG_HOME", home_config);
+    ENTRY("XDG_CACHE_HOME", psx_runtime_dir(PSX_RUNTIME_DIR_CACHE));
+    ENTRY("XDG_DATA_HOME", data_home);
+    ENTRY("PATH", path_value);
+    ENTRY("SSL_CERT_FILE", g_ca_bundle);
+    ENTRY("CURL_CA_BUNDLE", g_ca_bundle);
+    ENTRY("TERM", "xterm-256color");
+
+#undef ENTRY
+
+    return written;
+}
+
+bool
+psx_runtime_env_is_contract(const char *key)
+{
+    static const char *const keys[] = {
+        "HOME",           "TMPDIR",         "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME", "XDG_DATA_HOME",  "SSL_CERT_FILE",
+        "CURL_CA_BUNDLE",
+    };
+
+    if(!key) {
+        return false;
+    }
+
+    for(size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        if(strcmp(key, keys[i]) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static void
 env_add(char **out, size_t max, size_t *written, const char *key,
         const char *value)

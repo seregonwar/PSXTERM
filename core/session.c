@@ -14,6 +14,7 @@
 #include "psxterm/log.h"
 #include "psxterm/platform.h"
 #include "psxterm/protocol.h"
+#include "psxterm/runtime.h"
 #include "psxterm/session.h"
 #include "psxterm/shell.h"
 #include "psxterm/tty.h"
@@ -616,6 +617,48 @@ psx_session_capabilities(const psx_session_t *session)
     return caps;
 }
 
+/*
+ * Give external CLI processes the environment the runtime layout promises:
+ * the runtime home, its temporary directory, the XDG locations and the
+ * certificate bundle. Contract keys always win over whatever the daemon
+ * inherited; PATH keeps the inherited entries after the runtime ones, and
+ * the client's terminal type is left alone.
+ */
+static void
+session_apply_runtime_env(psx_session_t *session)
+{
+    psx_runtime_env_t rt[16];
+    size_t count = psx_runtime_env_table(rt, 16);
+
+    for(size_t i = 0; i < count; i++) {
+        const char *existing;
+
+        if(strcmp(rt[i].key, "PATH") == 0) {
+            char merged[PSX_PATH_MAX * 2 + 2];
+
+            existing = psx_env_get(&session->env, "PATH");
+            if(existing && *existing) {
+                snprintf(merged, sizeof(merged), "%s:%s", rt[i].value,
+                         existing);
+            } else {
+                snprintf(merged, sizeof(merged), "%s", rt[i].value);
+            }
+            psx_env_set(&session->env, "PATH", merged);
+            continue;
+        }
+
+        if(strcmp(rt[i].key, "TERM") == 0) {
+            continue;
+        }
+
+        existing = psx_env_get(&session->env, rt[i].key);
+        if(psx_runtime_env_is_contract(rt[i].key) || existing == NULL ||
+           !*existing) {
+            psx_env_set(&session->env, rt[i].key, rt[i].value);
+        }
+    }
+}
+
 int
 psx_session_begin(psx_session_t *session)
 {
@@ -631,6 +674,8 @@ psx_session_begin(psx_session_t *session)
         snprintf(session->cwd, sizeof(session->cwd), "%s", psx_fs_default_cwd());
     }
     psx_env_set(&session->env, "PWD", session->cwd);
+
+    session_apply_runtime_env(session);
 
     if(psx_tty_open(&session->tty, backend, session->rows, session->cols) < 0) {
         PSX_LOGW("session %u: tty backend %s unavailable (%s)", session->id,
