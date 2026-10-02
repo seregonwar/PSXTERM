@@ -442,21 +442,25 @@ ps5_rfork_entry(void *arg)
     }
 
     /*
-     * Wiring the session descriptors here, in the child, gets past the
-     * DUP_STDIO stage (nothing beyond the standard descriptors survives
-     * execve on this kernel), but the spawn then stalls later in the load
-     * sequence, so it stays behind an opt-in switch until that is understood.
-     * Default: the parent-side dup2/rdup path below, which fails cleanly.
+     * Replace the standard descriptors with the session ones here, in the
+     * child, while the inherited descriptor table is still valid: nothing
+     * beyond 0/1/2 survives execve on this kernel, so this is where the
+     * payload's stdio has to be installed. Set PSXTERM_PS5_CHILD_STDIO=0 to
+     * fall back to the parent-side dup2/rdup path.
      */
-    if(getenv("PSXTERM_PS5_CHILD_STDIO") != NULL) {
-        if(ctx->stdin_fd >= 0) {
-            dup2(ctx->stdin_fd, STDIN_FILENO);
-        }
-        if(ctx->stdout_fd >= 0) {
-            dup2(ctx->stdout_fd, STDOUT_FILENO);
-        }
-        if(ctx->stderr_fd >= 0) {
-            dup2(ctx->stderr_fd, STDERR_FILENO);
+    {
+        const char *opt = getenv("PSXTERM_PS5_CHILD_STDIO");
+
+        if(opt == NULL || opt[0] != '0') {
+            if(ctx->stdin_fd >= 0) {
+                dup2(ctx->stdin_fd, STDIN_FILENO);
+            }
+            if(ctx->stdout_fd >= 0) {
+                dup2(ctx->stdout_fd, STDOUT_FILENO);
+            }
+            if(ctx->stderr_fd >= 0) {
+                dup2(ctx->stderr_fd, STDERR_FILENO);
+            }
         }
     }
 
@@ -802,6 +806,7 @@ stage_set(psx_spawn_failure_t *failure, psx_spawn_stage_t stage, int error_code,
 static void
 raise_target_privileges(pid_t pid)
 {
+    const uint64_t system_authid = 0x4801000000000013ull;
     uint8_t caps[16];
     intptr_t root_vnode;
 
@@ -813,7 +818,14 @@ raise_target_privileges(pid_t pid)
         kernel_set_proc_jaildir(pid, 0);
     }
 
+    /* Same fields the reference loader writes on its victim, authid
+     * included: without it the target stays in the Sony credential class. */
     kernel_set_ucred_uid(pid, 0);
+    kernel_set_ucred_ruid(pid, 0);
+    kernel_set_ucred_svuid(pid, 0);
+    kernel_set_ucred_rgid(pid, 0);
+    kernel_set_ucred_svgid(pid, 0);
+    kernel_set_ucred_authid(pid, system_authid);
     kernel_set_ucred_caps(pid, caps);
 }
 
@@ -1103,6 +1115,8 @@ psx_platform_spawn(const psx_spawn_options_t *options,
 
     stage_set(failure, PSX_SPAWN_STAGE_LOAD_ELF, 0, NULL);
 
+    PSX_LOGI("ps5: load_elf: start");
+
     if(!(entry = load_elf(pid, elf, elf_size))) {
         stage_set(failure, PSX_SPAWN_STAGE_LOAD_ELF, errno,
                   "payload mapping, copy or relocation failed");
@@ -1112,11 +1126,28 @@ psx_platform_spawn(const psx_spawn_options_t *options,
         return -1;
     }
 
-    if(!(args = build_payload_args(pid))) {
-        PSX_LOGW("ps5: payload arguments unavailable, starting without them");
+    PSX_LOGI("ps5: load_elf: done entry=0x%lx", (unsigned long)entry);
+    PSX_LOGI("ps5: payload args: start");
+
+    /*
+     * The reference loader builds a payload-args blob (UDP socket pair, an
+     * in-victim pipe and the kernel data base) for payloads that speak that
+     * ABI. Ours is self-contained - it opens its own listener and logs to
+     * klog - and building those args stalls this firmware, so it is opt-in.
+     */
+    if(getenv("PSXTERM_PS5_PAYLOAD_ARGS") != NULL) {
+        if(!(args = build_payload_args(pid))) {
+            PSX_LOGW("ps5: payload arguments unavailable, starting without");
+        }
+    } else {
+        PSX_LOGI("ps5: payload args skipped (self-contained payload)");
     }
 
+    PSX_LOGI("ps5: payload args: done");
+
     stage_set(failure, PSX_SPAWN_STAGE_SET_REGISTERS, 0, NULL);
+
+    PSX_LOGI("ps5: setregs: start");
 
     if(pt_getregs(pid, &regs)) {
         stage_set(failure, PSX_SPAWN_STAGE_SET_REGISTERS, errno,
@@ -1130,6 +1161,8 @@ psx_platform_spawn(const psx_spawn_options_t *options,
     regs.r_rsp -= 8;
     regs.r_rip = entry;
     regs.r_rdi = (uint64_t)args;
+
+    PSX_LOGI("ps5: setregs: applying, then detaching");
 
     if(pt_setregs(pid, &regs)) {
         stage_set(failure, PSX_SPAWN_STAGE_SET_REGISTERS, errno,
