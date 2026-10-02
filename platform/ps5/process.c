@@ -830,6 +830,32 @@ raise_target_privileges(pid_t pid)
 }
 
 /*
+ * The reference loader lifts exactly these fields on its victim immediately
+ * before duplicating stdio, while it is stopped at the eboot entry
+ * breakpoint. Kept separate from the broader self-escalation set above
+ * because the extra credential fields may be what stalled the victim when
+ * they were written at this point.
+ */
+static void
+raise_target_privileges_minimal(pid_t pid)
+{
+    uint8_t caps[16];
+    intptr_t root_vnode;
+
+    memset(caps, 0xff, sizeof(caps));
+
+    root_vnode = kernel_get_root_vnode();
+    if(root_vnode == 0) {
+        return;
+    }
+
+    kernel_set_proc_rootdir(pid, root_vnode);
+    kernel_set_proc_jaildir(pid, 0);
+    kernel_set_ucred_uid(pid, 0);
+    kernel_set_ucred_caps(pid, caps);
+}
+
+/*
  * Duplicate the daemon-owned stdio descriptors into the victim process.
  *
  * RFCFDG hands the child a copy of our descriptor table and execve keeps
@@ -1109,8 +1135,10 @@ psx_platform_spawn(const psx_spawn_options_t *options,
      * kernels that close everything past the standard descriptors. Either way
      * the payload's stdio is already correct, so it is not fatal.
      */
+    raise_target_privileges_minimal(pid);
+
     if(dup_stdio(pid, mypid, options, failure) < 0) {
-        PSX_LOGI("ps5: stdio already wired by the child (%s)", strerror(errno));
+        PSX_LOGI("ps5: parent-side stdio install skipped: %s", failure->detail);
     }
 
     stage_set(failure, PSX_SPAWN_STAGE_LOAD_ELF, 0, NULL);
@@ -1140,7 +1168,24 @@ psx_platform_spawn(const psx_spawn_options_t *options,
             PSX_LOGW("ps5: payload arguments unavailable, starting without");
         }
     } else {
-        PSX_LOGI("ps5: payload args skipped (self-contained payload)");
+        /*
+         * SDK payloads read their arguments from rdi; a NULL there leaves the
+         * process alive but unable to start. The full reference ABI needs a
+         * UDP socket pair and an in-victim pipe, which stall this firmware, so
+         * hand over a zeroed page instead of nothing at all.
+         */
+        intptr_t page = pt_mmap(pid, 0, PAGE_SIZE, PROT_READ | PROT_WRITE,
+                                MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+
+        if(page == -1) {
+            PSX_LOGW("ps5: minimal payload args page unavailable (%s)",
+                     strerror(errno));
+            args = 0;
+        } else {
+            args = page;
+            PSX_LOGI("ps5: payload args: minimal page 0x%lx",
+                     (unsigned long)page);
+        }
     }
 
     PSX_LOGI("ps5: payload args: done");
