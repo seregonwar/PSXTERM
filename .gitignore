@@ -43,5 +43,7 @@ __pycache__/
 # Local development prompts (deliberately not tracked)
 PSXTerm — Strict Incremental Development Prompt.md
 PSXTerm — Hardware Bring-Up and Next-Stage Development Prompt.md
+PSXTerm — CI Stabilization and Hardware Bring-Up Gate Prompt.md
+PSXTerm * Prompt.md
 
 /.commandcode
