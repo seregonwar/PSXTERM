@@ -179,8 +179,14 @@ psx_runtime_env_table(psx_runtime_env_t *out, size_t max)
                   psx_runtime_dir(PSX_RUNTIME_DIR_HOME), ".config");
     psx_path_join(data_home, sizeof(data_home),
                   psx_runtime_dir(PSX_RUNTIME_DIR_HOME), ".local/share");
-    psx_path_join(path_value, sizeof(path_value), psx_platform_bin_dir(),
-                  psx_runtime_dir(PSX_RUNTIME_DIR_BIN));
+
+    /*
+     * PATH is a search list, not a path: the runtime bin comes first, then
+     * the daemon's own bin directory. Joining them would have produced
+     * ".../bin//data/psxterm/runtime/bin" (seen on hardware).
+     */
+    snprintf(path_value, sizeof(path_value), "%s:%s",
+             psx_runtime_dir(PSX_RUNTIME_DIR_BIN), psx_platform_bin_dir());
 
 #define ENTRY(key_, value_)                                                   \
     do {                                                                      \
@@ -277,8 +283,8 @@ psx_runtime_environment(char **out, size_t max)
                   psx_runtime_dir(PSX_RUNTIME_DIR_HOME), ".local/share");
     env_add(out, max, &written, "XDG_DATA_HOME", path);
 
-    psx_path_join(path, sizeof(path), psx_platform_bin_dir(),
-                  psx_runtime_dir(PSX_RUNTIME_DIR_BIN));
+    snprintf(path, sizeof(path), "%s:%s",
+             psx_runtime_dir(PSX_RUNTIME_DIR_BIN), psx_platform_bin_dir());
     env_add(out, max, &written, "PATH", path);
 
     env_add(out, max, &written, "SSL_CERT_FILE", g_ca_bundle);

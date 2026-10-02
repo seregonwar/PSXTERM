@@ -5,12 +5,43 @@
  * line from stdin, writes to stdout and stderr, and exits with a known code.
  * Built for the host (integration tests) and for PS4/PS5 (payload ELF).
  */
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
+
+/*
+ * Breadcrumbs on the filesystem, written from inside the payload.
+ *
+ * When the session shows nothing after a certain point, these say whether
+ * the payload reached that point at all and whether its own libc stdio can
+ * write to the console filesystem - information the session cannot provide
+ * by definition, because it is the thing under suspicion.
+ */
+static void
+marker(const char *text)
+{
+    FILE *file = fopen("/data/psxterm/matrix.log", "a");
+
+    if(file) {
+        fprintf(file, "%s\n", text);
+        fclose(file);
+    }
+
+    {
+        int fd = open("/data/psxterm/matrix-raw.log",
+                      O_WRONLY | O_CREAT | O_APPEND, 0644);
+
+        if(fd >= 0) {
+            (void)write(fd, text, strlen(text));
+            (void)write(fd, "\n", 1);
+            close(fd);
+        }
+    }
+}
 
 static void
 print_env(const char *name)
@@ -34,6 +65,8 @@ main(int argc, char **argv)
      */
     setvbuf(stdout, NULL, _IOLBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+
+    marker("entry");
 
     /* Raw markers on the descriptors, so a run that hangs still shows how far
      * it got even when libc stdio is the thing under suspicion. */
@@ -81,6 +114,38 @@ main(int argc, char **argv)
 
     fprintf(stderr, "cli_test: stderr works\n");
     printf("cli_test: exiting with 7\n");
+
+    marker("after-stdin");
+
+    /*
+     * Stdio acceptance matrix: every call shape a real CLI uses, each with a
+     * distinct marker so a missing one names the call that failed.
+     */
+    (void)write(STDOUT_FILENO, "matrix: write stdout\n", 21);
+    (void)write(STDERR_FILENO, "matrix: write stderr\n", 21);
+
+    printf("matrix: printf stdout\n");
+    fflush(stdout);
+
+    fprintf(stdout, "matrix: fprintf stdout\n");
+    fflush(stdout);
+
+    fprintf(stderr, "matrix: fprintf stderr\n");
+    fflush(stderr);
+
+    puts("matrix: puts stdout");
+    fflush(stdout);
+
+    {
+        char block[32];
+        size_t got = fread(block, 1, sizeof(block) - 1, stdin);
+
+        block[got] = '\0';
+        printf("matrix: fread=%zu\n", got);
+        fflush(stdout);
+    }
+
+    marker("end");
 
     return 7;
 }

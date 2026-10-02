@@ -25,6 +25,13 @@ typedef struct {
     bool running;
     int status; /* wait status once exited */
     uint64_t started_ms;
+
+    /*
+     * Daemon's end of the foreground process's stdin pipe. Kept separate from
+     * the terminal pair so the end of input can be signalled without touching
+     * the descriptors the process writes its output to.
+     */
+    int stdin_fd;
 } psx_process_t;
 
 typedef struct {

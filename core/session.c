@@ -40,6 +40,7 @@ psx_session_create(uint32_t id, int sock_fd)
     session->id = id;
     session->sock_fd = sock_fd;
     session->file_fd = -1;
+    session->proc.stdin_fd = -1;
     session->state = PSX_SESSION_ACCEPTED;
     session->rows = 24;
     session->cols = 80;
@@ -745,6 +746,16 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
     options.path = path;
     options.argv = argv;
     options.envp = envp;
+
+    /*
+     * NOTE (hardware): giving the process a pipe for stdin is the right shape
+     * eventually, because the end of input is then a close that cannot touch
+     * the output descriptors. It is not enabled yet: the platform's stdio
+     * install aborts on the first descriptor it cannot import, so a pipe that
+     * fails to import also costs stdout and stderr - measured on hardware as
+     * a payload that printed only its first raw line. Fix the per-descriptor
+     * install first, then turn this on.
+     */
     options.stdin_fd = session->tty.slave_fd;
     options.stdout_fd = session->tty.slave_fd;
     options.stderr_fd = session->tty.slave_fd;
@@ -831,10 +842,30 @@ psx_session_check_process(psx_session_t *session)
 
     session->proc.running = false;
     session->proc.status = status;
+
+    if(session->proc.stdin_fd >= 0) {
+        close(session->proc.stdin_fd);
+        session->proc.stdin_fd = -1;
+    }
+
     snprintf(session->command, sizeof(session->command), "%s", "psh");
 
-    /* Drain anything the process left in the tty. */
-    psx_session_on_tty_readable(session);
+    /*
+     * Drain everything the process left in the tty before the session
+     * recreates it. A single pass is not enough: the tty read is bounded and
+     * whatever stays behind is discarded when the tty is closed, which is
+     * exactly how the tail of a process's output used to disappear on
+     * hardware.
+     */
+    for(int pass = 0; pass < 16; pass++) {
+        size_t before = psx_buf_pending(&session->out);
+
+        psx_session_on_tty_readable(session);
+
+        if(psx_buf_pending(&session->out) == before) {
+            break;
+        }
+    }
 
     /*
      * Keystrokes still queued were destined for the process that just exited.
@@ -1270,11 +1301,82 @@ file_handle_read_request(psx_session_t *session)
 
 /* --- socket IO ---------------------------------------------------------- */
 
+/* Feed the foreground process's stdin pipe, tolerating a full pipe. */
+static int
+session_write_process_stdin(psx_session_t *session, const uint8_t *data,
+                            size_t len)
+{
+    size_t offset = 0;
+
+    while(offset < len) {
+        ssize_t n = write(session->proc.stdin_fd, data + offset, len - offset);
+
+        if(n < 0) {
+            if(errno == EINTR) {
+                continue;
+            }
+            if(errno == EAGAIN || errno == EWOULDBLOCK) {
+                /*
+                 * The process is not reading. Count what could not be handed
+                 * over instead of blocking the whole session loop; the input
+                 * queue towards the session already applies backpressure.
+                 */
+                session->input_discarded_bytes += len - offset;
+                return 0;
+            }
+            PSX_LOGW("session %u: stdin write: %s", session->id,
+                     strerror(errno));
+            return -1;
+        }
+
+        offset += (size_t)n;
+    }
+
+    return 0;
+}
+
 static int
 session_forward_to_process(psx_session_t *session, const uint8_t *payload,
                            size_t len)
 {
     size_t offset = 0;
+
+    /*
+     * Preferred path: the process reads from its own pipe.
+     *
+     * End of input is then just closing the write end, which cannot disturb
+     * the descriptors the process writes to. On a pipe-backed tty there is no
+     * line discipline either, so Ctrl+C is translated into SIGINT here.
+     */
+    if(session->proc.stdin_fd >= 0) {
+        size_t start = 0;
+
+        for(size_t i = 0; i < len; i++) {
+            if(payload[i] == 0x03) {
+                if(i > start &&
+                   session_write_process_stdin(session, payload + start,
+                                               i - start) < 0) {
+                    return -1;
+                }
+                psx_process_kill(session->proc.pid, SIGINT);
+                start = i + 1;
+            }
+        }
+
+        if(len == 0) {
+            close(session->proc.stdin_fd);
+            session->proc.stdin_fd = -1;
+            return 0;
+        }
+
+        if(len > start &&
+           session_write_process_stdin(session, payload + start,
+                                       len - start) < 0) {
+            return -1;
+        }
+
+        return 0;
+    }
 
     /* Zero-length STDIN is an EOF marker for the foreground process. */
     if(len == 0) {

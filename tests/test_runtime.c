@@ -70,7 +70,9 @@ test_environment(void)
             has_xdg = true;
         }
         if(strncmp(env[i], "PATH=", 5) == 0) {
-            has_path = strstr(env[i], "/runtime/bin") != NULL;
+            /* A search list: runtime bin first, no doubled separator. */
+            has_path = strstr(env[i], "/runtime/bin:") != NULL &&
+                       strstr(env[i], "//") == NULL;
         }
         if(strncmp(env[i], "SSL_CERT_FILE=", 14) == 0) {
             has_tls = strstr(env[i], "ca-bundle.crt") != NULL;
