@@ -749,13 +749,15 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
 
     /*
      * NOTE (hardware): giving the process a pipe for stdin is the right shape
-     * eventually, because the end of input is then a close that cannot touch
-     * the output descriptors. It is not enabled yet: the platform's stdio
-     * install aborts on the first descriptor it cannot import, so a pipe that
-     * fails to import also costs stdout and stderr - measured on hardware as
-     * a payload that printed only its first raw line. Fix the per-descriptor
-     * install first, then turn this on.
+     * for the end of input, but enabling it today costs the payload its
+     * stdout - even with the platform installing each stdio descriptor
+     * independently, the session then shows nothing but the payload's first
+     * raw line while the payload itself runs to completion (breadcrumbs in
+     * /data/psxterm/matrix.log). The stdin pipe plumbing below is kept for
+     * that work; the tty is used until it is understood.
      */
+    (void)session->proc.stdin_fd;
+    session->proc.stdin_fd = -1;
     options.stdin_fd = session->tty.slave_fd;
     options.stdout_fd = session->tty.slave_fd;
     options.stderr_fd = session->tty.slave_fd;

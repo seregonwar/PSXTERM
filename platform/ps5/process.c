@@ -1013,69 +1013,73 @@ raise_target_privileges_minimal(pid_t pid)
 }
 
 /*
+ * Install one descriptor into the victim, independently of the others.
+ *
+ * Hardware lesson: when this aborted on the first failure, a stdin that could
+ * not be imported also cost the process its stdout and stderr - the payload
+ * then printed nothing beyond its first raw line.
+ */
+static int
+install_stdio_fd(pid_t pid, pid_t owner, int fd, int target)
+{
+    if(fd < 0) {
+        return -1;
+    }
+
+    if(pt_dup2(pid, fd, target) == target) {
+        return 0;
+    }
+
+    {
+        int fallback = (int)pt_rdup(pid, owner, fd);
+
+        if(fallback < 0) {
+            return -1;
+        }
+
+        if(pt_dup2(pid, fallback, target) != target) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+/*
  * Duplicate the daemon-owned stdio descriptors into the victim process.
  *
  * RFCFDG hands the child a copy of our descriptor table and execve keeps
  * every non-CLOEXEC descriptor, so the session fds are normally already
  * present in the victim under the same numbers: clear CLOEXEC before the
- * fork and dup2 directly. The rdup syscall is kept as the fallback for the
- * case where the numbers did not survive.
+ * fork and dup2 directly. The rdup syscall is the fallback for the case
+ * where the numbers did not survive.
  */
 static int
 dup_stdio(pid_t pid, pid_t owner, const psx_spawn_options_t *options,
           psx_spawn_failure_t *failure)
 {
-    int in_fd = options->stdin_fd;
-    int out_fd = options->stdout_fd;
-    int err_fd = options->stderr_fd;
-    char detail[128];
+    int failures = 0;
 
-    {
-        int rc = (int)pt_dup2(pid, in_fd, STDIN_FILENO);
-
-        if(rc < 0) {
-            int fallback = (int)pt_rdup(pid, owner, options->stdin_fd);
-
-            if(fallback < 0) {
-                snprintf(detail, sizeof(detail),
-                         "stdin duplication failed (dup2=%d rdup=%d)", rc,
-                         fallback);
-                stage_set(failure, PSX_SPAWN_STAGE_DUP_STDIO, errno, detail);
-                return -1;
-            }
-
-            in_fd = fallback;
-            pt_dup2(pid, in_fd, STDIN_FILENO);
-        }
+    if(install_stdio_fd(pid, owner, options->stdin_fd, STDIN_FILENO) != 0) {
+        failures++;
+        PSX_LOGW("ps5: stdin could not be installed in the victim");
     }
 
-    if(pt_dup2(pid, out_fd, STDOUT_FILENO) < 0) {
-        out_fd = pt_rdup(pid, owner, options->stdout_fd);
-        if(out_fd < 0) {
-            stage_set(failure, PSX_SPAWN_STAGE_DUP_STDIO, errno,
-                      "stdout duplication failed");
-            return -1;
-        }
-        pt_dup2(pid, out_fd, STDOUT_FILENO);
+    if(install_stdio_fd(pid, owner, options->stdout_fd, STDOUT_FILENO) != 0) {
+        failures++;
+        PSX_LOGW("ps5: stdout could not be installed in the victim");
     }
 
-    if(pt_dup2(pid, err_fd, STDERR_FILENO) < 0) {
-        err_fd = pt_rdup(pid, owner, options->stderr_fd);
-        if(err_fd < 0) {
-            stage_set(failure, PSX_SPAWN_STAGE_DUP_STDIO, errno,
-                      "stderr duplication failed");
-            return -1;
-        }
-        pt_dup2(pid, err_fd, STDERR_FILENO);
+    if(install_stdio_fd(pid, owner, options->stderr_fd, STDERR_FILENO) != 0) {
+        failures++;
+        PSX_LOGW("ps5: stderr could not be installed in the victim");
     }
 
-    if(out_fd != in_fd) {
-        pt_close(pid, out_fd);
+    if(failures != 0) {
+        stage_set(failure, PSX_SPAWN_STAGE_DUP_STDIO, errno,
+                  "one or more stdio descriptors could not be installed");
+        return -1;
     }
-    if(err_fd != in_fd && err_fd != out_fd) {
-        pt_close(pid, err_fd);
-    }
-    pt_close(pid, in_fd);
 
     return 0;
 }
