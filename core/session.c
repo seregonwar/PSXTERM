@@ -1509,6 +1509,14 @@ psx_session_handle_frame(psx_session_t *session, const ptty_header_t *header,
     case PTTY_MSG_DETACH:
         return PSX_SESSION_FRAME_DETACH;
 
+    case PTTY_MSG_SHUTDOWN:
+        /* Administrative command during bring-up: report it to the server,
+         * which owns the daemon loop, and close this connection cleanly. */
+        session->shutdown_requested = true;
+        psx_session_emit(session, PTTY_MSG_CLOSE, NULL, 0);
+        session->state = PSX_SESSION_CLOSING;
+        return PSX_SESSION_FRAME_CLOSE;
+
     case PTTY_MSG_PING:
         return psx_session_emit(session, PTTY_MSG_PONG, payload,
                                 header->payload_length) < 0

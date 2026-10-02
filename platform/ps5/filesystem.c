@@ -1,11 +1,28 @@
 #include <errno.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <ps5/kernel.h>
 
 #include "psxterm/log.h"
 #include "psxterm/platform.h"
+
+static bool
+ensure_dir(const char *path)
+{
+    struct stat st;
+
+    if(stat(path, &st) == 0) {
+        return S_ISDIR(st.st_mode);
+    }
+
+    if(mkdir(path, 0755) == 0) {
+        return true;
+    }
+
+    return errno == EEXIST;
+}
 
 /*
  * PS5 filesystem preparation.
@@ -42,6 +59,17 @@ psx_fs_prepare(void)
     if(access("/data", W_OK) != 0) {
         PSX_LOGW("fs: /data still not writable; using the sandboxed root");
         return false;
+    }
+
+    /* PSXTerm home and tool directory (hardware bring-up finding: they do not
+     * exist on a fresh console and nothing else creates them). */
+    if(!ensure_dir("/data/psxterm")) {
+        PSX_LOGW("fs: cannot create /data/psxterm: %s", strerror(errno));
+        return false;
+    }
+
+    if(!ensure_dir("/data/psxterm/bin")) {
+        PSX_LOGW("fs: cannot create /data/psxterm/bin: %s", strerror(errno));
     }
 
     return true;

@@ -127,6 +127,9 @@ typedef struct psx_session {
      * recreated before the next process is spawned. */
     bool tty_input_closed;
 
+    /* Set when the client asked the daemon to shut down (bring-up helper). */
+    bool shutdown_requested;
+
     /* 0 while the shell runs in-process (this build); reserved for a
      * process-backed shell on target platforms. */
     pid_t shell_pid;

@@ -103,7 +103,14 @@ typedef enum {
     PTTY_MSG_FILE_SEEK = 30,
     PTTY_MSG_FILE_CLOSE = 31,
     PTTY_MSG_FILE_RESULT = 32,
-    PTTY_MSG_FILE_STAT = 33
+    PTTY_MSG_FILE_STAT = 33,
+    /*
+     * Administrative shutdown, used to replace a running payload during
+     * hardware bring-up (there is no shell on the console to kill it from).
+     * Accepted only after HELLO, so daemon authentication still applies. The
+     * daemon closes every session and exits.
+     */
+    PTTY_MSG_SHUTDOWN = 34
 } ptty_msg_type_t;
 
 /* FILE_OPEN modes */

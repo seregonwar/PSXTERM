@@ -225,6 +225,13 @@ server_handshake_frame(psx_server_t *server, psx_session_t *session,
                    ? PSX_SESSION_FRAME_ERROR
                    : PSX_SESSION_FRAME_CONTINUE;
 
+    case PTTY_MSG_SHUTDOWN:
+        PSX_LOGI("session %u: shutdown requested by client", session->id);
+        ptty_send_simple(session->sock_fd, PTTY_MSG_CLOSE, 0, session->id, NULL,
+                         0);
+        g_shutdown = 1;
+        return PSX_SESSION_FRAME_CLOSE;
+
     case PTTY_MSG_CLOSE:
         return PSX_SESSION_FRAME_ERROR;
 
@@ -447,6 +454,13 @@ server_tick(psx_server_t *server)
 
     for(session = server->sessions.sessions; session; session = next) {
         next = session->next;
+
+        /* A client asked for an administrative shutdown. */
+        if(session->shutdown_requested) {
+            PSX_LOGI("shutdown requested by a client");
+            g_shutdown = 1;
+            break;
+        }
 
         /* Placeholder sessions left over from a successful attach. */
         if(session->state == PSX_SESSION_CLOSED) {

@@ -103,6 +103,13 @@ psx_platform_inherit_environ(void)
     return environ;
 }
 
+void
+psx_platform_log_line(const char *line)
+{
+    /* The development host has a real stderr; nothing extra to do. */
+    (void)line;
+}
+
 bool
 psx_platform_is_target(void)
 {

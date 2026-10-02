@@ -46,6 +46,13 @@ int psx_platform_random_bytes(void *buf, size_t len);
 char *const *psx_platform_inherit_environ(void);
 
 /*
+ * Platform log sink. On consoles the payload's stderr usually leads nowhere,
+ * so logs are also forwarded to the kernel log (visible through the klog
+ * server); the host implementation does nothing.
+ */
+void psx_platform_log_line(const char *line);
+
+/*
  * Filesystem preparation, called once during psx_platform_init(). On
  * PS4/PS5 this is where a payload would make /data reachable; the host
  * implementation is a no-op.

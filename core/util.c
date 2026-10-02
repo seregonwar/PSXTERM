@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -12,11 +13,30 @@ psx_now_ms(void)
 {
     struct timespec ts;
 
-    if(clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-        return 0;
+    /*
+     * Hardware finding: CLOCK_MONOTONIC is not reliable in the PS5 payload
+     * environment (the elapsed diagnostics time came back as 0 ms), so fall
+     * back to CLOCK_REALTIME and then gettimeofday. Timeouts only need a
+     * clock that advances.
+     */
+    if(clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+        return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
     }
 
-    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
+    if(clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+        return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
+    }
+
+    {
+        struct timeval tv;
+
+        if(gettimeofday(&tv, NULL) == 0) {
+            return (uint64_t)tv.tv_sec * 1000u +
+                   (uint64_t)(tv.tv_usec / 1000);
+        }
+    }
+
+    return 0;
 }
 
 int

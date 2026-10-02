@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "psxterm/diag.h"
@@ -412,6 +413,24 @@ check_platform(psx_diag_report_t *report)
                  psx_tty_backend_name(tty),
                  tty == PSX_TTY_BACKEND_FREEBSD_PTY ? " (real pty)"
                                                     : " (fallback)");
+
+    /*
+     * Monotonic time drives every timeout in the daemon, so verify that the
+     * clock actually advances instead of trusting clock_gettime.
+     */
+    {
+        struct timespec pause = {.tv_sec = 0, .tv_nsec = 20 * 1000 * 1000};
+        uint64_t before = psx_now_ms();
+
+        nanosleep(&pause, NULL);
+        if(psx_now_ms() > before) {
+            psx_diag_add(group, "clock", PSX_DIAG_PASS, 0,
+                         "advances (%llu ms)", (unsigned long long)before);
+        } else {
+            psx_diag_add(group, "clock", PSX_DIAG_FAIL, 0,
+                         "does not advance (timeouts would never fire)");
+        }
+    }
 }
 
 static void

@@ -409,6 +409,7 @@ ptty_msg_name(uint8_t type)
     case PTTY_MSG_FILE_CLOSE: return "FILE_CLOSE";
     case PTTY_MSG_FILE_RESULT: return "FILE_RESULT";
     case PTTY_MSG_FILE_STAT: return "FILE_STAT";
+    case PTTY_MSG_SHUTDOWN: return "SHUTDOWN";
     default: return "UNKNOWN";
     }
 }

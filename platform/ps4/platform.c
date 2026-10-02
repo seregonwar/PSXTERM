@@ -3,6 +3,7 @@
 #include <stdlib.h>
 
 #include <ps4/kernel.h>
+#include <ps4/klog.h>
 
 #include "psxterm/log.h"
 #include "psxterm/platform.h"
@@ -79,6 +80,13 @@ char *const *
 psx_platform_inherit_environ(void)
 {
     return NULL;
+}
+
+void
+psx_platform_log_line(const char *line)
+{
+    klog_printf("%s", line);
+    klog_printf("%s", "\n");
 }
 
 bool

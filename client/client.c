@@ -1115,6 +1115,7 @@ usage(const char *argv0)
     printf("       %s push [options] <host> <local> <remote>\n", argv0);
     printf("       %s pull [options] <host> <remote> <local>\n", argv0);
     printf("       %s install [options] <host> <local>\n", argv0);
+    printf("       %s shutdown [options] <host>\n", argv0);
     printf("\n");
     printf("Connect to a PSXTerm daemon on a PS4/PS5.\n");
     printf("\n");
@@ -1152,6 +1153,7 @@ main(int argc, char **argv)
     bool push_mode = false;
     bool pull_mode = false;
     bool install_mode = false;
+    bool shutdown_mode = false;
     const char *arg_a = NULL;
     const char *arg_b = NULL;
     uint32_t attach_id = 0;
@@ -1197,6 +1199,8 @@ main(int argc, char **argv)
             pull_mode = true;
         } else if(strcmp(arg, "install") == 0 && !host) {
             install_mode = true;
+        } else if(strcmp(arg, "shutdown") == 0 && !host) {
+            shutdown_mode = true;
         } else if(strcmp(arg, "--resume") == 0) {
             if(++i >= argc) {
                 return EXIT_USAGE;
@@ -1299,6 +1303,44 @@ main(int argc, char **argv)
             }
             printf("%s\n", sep + 1);
         }
+    }
+
+    /*
+     * Administrative shutdown (bring-up): the console has no shell to kill a
+     * running payload from, so the daemon can be asked to exit cleanly.
+     */
+    if(shutdown_mode) {
+        bool acknowledged = false;
+
+        if(send_frame(fd, PTTY_MSG_SHUTDOWN, NULL, 0) < 0) {
+            fprintf(stderr, "psxterm: cannot request shutdown\n");
+            close(fd);
+            return 1;
+        }
+
+        for(int i = 0; i < 20; i++) {
+            if(wait_frame(&reader, fd, &header, &payload, 1000) != 0) {
+                break;
+            }
+            if(header.type == PTTY_MSG_CLOSE) {
+                acknowledged = true;
+                break;
+            }
+        }
+
+        close(fd);
+
+        if(!acknowledged) {
+            fprintf(stderr,
+                    "psxterm: the daemon did not acknowledge the shutdown\n"
+                    "         (it may predate the command and still be "
+                    "running)\n");
+            return 1;
+        }
+
+        printf("daemon is shutting down\n");
+
+        return 0;
     }
 
     /* OPEN with window size and TERM (not used when attaching). */

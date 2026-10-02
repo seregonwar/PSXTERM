@@ -1,13 +1,33 @@
 # Hardware bring-up guide (PS4 / PS5)
 
-PSXTerm is host tested, but **no PS4 or PS5 runtime path has been executed on a
-console yet**. Everything console-related is therefore marked
-`HARDWARE TEST REQUIRED` until it runs on real hardware. This guide describes
-the exact bring-up sequence, what each step proves, and what to collect when a
-step fails.
+PSXTerm is host tested, and the PS5 bring-up is now in progress. This
+document records the sequence and, in the results section below, exactly what
+was observed on hardware. Anything not listed there is still
+`HARDWARE TEST REQUIRED`.
 
-Nothing in this document contains hardware results. If you run the sequence,
-record what you actually observed.
+## Observed results
+
+### PS5 (firmware unrecorded, payload loaded with ps5-payload-dev elfldr)
+
+Status: **PARTIAL** - daemon, protocol, shell, diagnostics and file transfer
+run on hardware; the process (exec) backend is still being validated.
+
+| Item | Result |
+|---|---|
+| `psxtermd` payload loads and runs | PASS (`PSXTerm 0.1.0 (PS5) listening on 0.0.0.0:2323`) |
+| PTTY/1 handshake, OPEN, prompt over TCP | PASS |
+| Remote shell builtins (`pwd`, `uname`, `whoami`, `ls /`, `ls /dev`, `ls /data`) | PASS |
+| Diagnostics (`psxterm doctor`) over the network | PASS (report delivered) |
+| Kernel log visibility (`klog` on port 3232) | PASS (daemon logs appear as `[payload.elf] psxterm: ...`) |
+| `/data` writable, sandbox lifted | PASS |
+| `/data/psxterm` + `/data/psxterm/bin` | FAIL on first run: they did not exist; the daemon now creates them |
+| Real FreeBSDPTY (`/dev/ptmx`) | **NOT AVAILABLE**: `/dev/ptmx` and `/dev/pts` do not exist on the console; `ls /dev` shows `deci_tty*`, `ctty`, `ttyu0`. PipeTTY is the working backend (`REAL PTY NOT YET AVAILABLE`) |
+| Monotonic clock | FAIL: `clock_gettime(CLOCK_MONOTONIC)` does not advance (diagnostics elapsed time was 0 ms); `psx_now_ms()` now falls back to `CLOCK_REALTIME`/`gettimeofday` and a doctor check verifies that the clock advances |
+| External execution (`cli_test` spawn) | PENDING (was blocked on cli_test not being installed; push is implemented) |
+| Resize / signals on hardware | PENDING |
+
+The first doctor run reported `NOT READY` with these findings - exactly the
+kind of stage-level information the diagnostics were built for.
 
 ## Status vocabulary
 

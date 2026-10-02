@@ -3,6 +3,7 @@
 #include <stdlib.h>
 
 #include <ps5/kernel.h>
+#include <ps5/klog.h>
 
 #include "psxterm/log.h"
 #include "psxterm/platform.h"
@@ -82,6 +83,13 @@ psx_platform_inherit_environ(void)
     /* A payload starts from the process it was injected into; PSXTerm builds
      * session environments from its own defaults instead. */
     return NULL;
+}
+
+void
+psx_platform_log_line(const char *line)
+{
+    klog_printf("%s", line);
+    klog_printf("%s", "\n");
 }
 
 bool
