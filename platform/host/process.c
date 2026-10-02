@@ -2,6 +2,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -17,22 +18,68 @@
  * the foreground process group through the line discipline.
  */
 
-pid_t
-psx_platform_spawn(const psx_spawn_options_t *options)
+static void
+stage_set(psx_spawn_failure_t *failure, psx_spawn_stage_t stage, int error_code,
+          const char *detail)
 {
-    pid_t pid = fork();
+    if(!failure) {
+        return;
+    }
 
-    if(pid < 0) {
+    failure->stage = stage;
+    failure->error_code = error_code;
+    failure->detail[0] = '\0';
+
+    if(detail) {
+        snprintf(failure->detail, sizeof(failure->detail), "%s", detail);
+    }
+}
+
+pid_t
+psx_platform_spawn(const psx_spawn_options_t *options,
+                   psx_spawn_failure_t *failure)
+{
+    pid_t pid;
+
+    stage_set(failure, PSX_SPAWN_STAGE_PREPARE, 0, NULL);
+
+    if(!options->path || !*options->path) {
+        stage_set(failure, PSX_SPAWN_STAGE_PREPARE, EINVAL,
+                  "empty executable path");
+        errno = EINVAL;
+        return -1;
+    }
+
+    stage_set(failure, PSX_SPAWN_STAGE_CREATE_VICTIM, 0, NULL);
+
+    if((pid = fork()) < 0) {
+        stage_set(failure, PSX_SPAWN_STAGE_CREATE_VICTIM, errno,
+                  "fork failed");
         return -1;
     }
 
     if(pid == 0) {
-        /* Child */
+        /* Child: failures are reported through the exit status (126 setup,
+         * 127 not found, 126 other exec errors). */
         int tty_fd = options->stdin_fd;
 
         signal(SIGPIPE, SIG_DFL);
 
         if(tty_fd >= 0) {
+            struct sigaction sa;
+
+            /*
+             * The child must not inherit the daemon's signal handlers, in
+             * particular not the SIGINT/SIGTERM handler that only writes to
+             * the shutdown pipe.
+             */
+            memset(&sa, 0, sizeof(sa));
+            sa.sa_handler = SIG_DFL;
+            sigaction(SIGINT, &sa, NULL);
+            sigaction(SIGTERM, &sa, NULL);
+            sigaction(SIGQUIT, &sa, NULL);
+            sigaction(SIGHUP, &sa, NULL);
+
             setsid();
             ioctl(tty_fd, TIOCSCTTY, 0);
 
@@ -64,6 +111,8 @@ psx_platform_spawn(const psx_spawn_options_t *options)
 
         _exit(errno == ENOENT ? 127 : 126);
     }
+
+    stage_set(failure, PSX_SPAWN_STAGE_RUNNING, 0, NULL);
 
     return pid;
 }

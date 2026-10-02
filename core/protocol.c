@@ -390,6 +390,9 @@ ptty_msg_name(uint8_t type)
     case PTTY_MSG_EXIT: return "EXIT";
     case PTTY_MSG_PING: return "PING";
     case PTTY_MSG_PONG: return "PONG";
+    case PTTY_MSG_DIAG_REQUEST: return "DIAG_REQUEST";
+    case PTTY_MSG_DIAG_DATA: return "DIAG_DATA";
+    case PTTY_MSG_DIAG_DONE: return "DIAG_DONE";
     default: return "UNKNOWN";
     }
 }

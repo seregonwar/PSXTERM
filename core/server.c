@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "psxterm/diag.h"
 #include "psxterm/log.h"
 #include "psxterm/platform.h"
 #include "psxterm/protocol.h"
@@ -231,10 +232,12 @@ server_session_readable(psx_server_t *server, psx_session_t *session)
             return -1;
         }
         if(rc == PTTY_READ_PROTOCOL) {
+            session->protocol_errors++;
             PSX_LOGW("session %u: protocol error", session->id);
             return -1;
         }
 
+        session->frames_in++;
         psx_session_touch(session);
 
         if(session->state == PSX_SESSION_RUNNING ||
@@ -668,6 +671,8 @@ usage(const char *argv0)
            SERVER_DEFAULT_HANDSHAKE_MS);
     printf("      --idle-timeout MS    drop idle sessions (default off)\n");
     printf("      --tty MODE           auto|pty|pipe (default auto)\n");
+    printf("      --doctor             run local diagnostics and exit\n");
+    printf("      --json               machine-readable diagnostics output\n");
     printf("  -v, --verbose            debug logging\n");
     printf("  -q, --quiet              errors only\n");
     printf("      --version            print version\n");
@@ -675,7 +680,8 @@ usage(const char *argv0)
 }
 
 static int
-parse_args(int argc, char **argv, psx_server_config_t *config)
+parse_args(int argc, char **argv, psx_server_config_t *config, bool *doctor,
+           bool *json)
 {
     for(int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -739,6 +745,10 @@ parse_args(int argc, char **argv, psx_server_config_t *config)
                          argv[i]);
                 return -1;
             }
+        } else if(strcmp(arg, "--doctor") == 0) {
+            *doctor = true;
+        } else if(strcmp(arg, "--json") == 0) {
+            *json = true;
         } else if(strcmp(arg, "-v") == 0 || strcmp(arg, "--verbose") == 0) {
             psx_log_set_level(PSX_LOG_DEBUG);
         } else if(strcmp(arg, "-q") == 0 || strcmp(arg, "--quiet") == 0) {
@@ -761,20 +771,62 @@ parse_args(int argc, char **argv, psx_server_config_t *config)
     return 0;
 }
 
+/* Local (on-console) diagnostics: no client session required. */
+static int
+run_local_diagnostics(bool json)
+{
+    psx_diag_report_t report;
+    psx_diag_status_t overall;
+    size_t needed;
+    char *text;
+
+    psx_diag_report_init(&report);
+    psx_diag_run(&report, NULL);
+
+    needed = json ? psx_diag_format_json(&report, NULL, 0)
+                  : psx_diag_format_human(&report, NULL, 0);
+
+    if(!(text = malloc(needed + 1))) {
+        psx_diag_report_free(&report);
+        return PSX_DIAG_EXIT_FAILED;
+    }
+
+    if(json) {
+        psx_diag_format_json(&report, text, needed + 1);
+    } else {
+        psx_diag_format_human(&report, text, needed + 1);
+    }
+
+    fputs(text, stdout);
+    fflush(stdout);
+    free(text);
+
+    overall = psx_diag_overall_status(&report);
+    psx_diag_report_free(&report);
+
+    return psx_diag_exit_code(overall);
+}
+
 int
 main(int argc, char **argv)
 {
     psx_server_config_t config;
+    bool doctor = false;
+    bool json = false;
 
     psx_server_config_default(&config);
 
-    if(parse_args(argc, argv, &config) < 0) {
+    if(parse_args(argc, argv, &config, &doctor, &json) < 0) {
         return 2;
     }
 
     if(!psx_platform_init()) {
         PSX_LOGE("platform initialization failed");
         return 1;
+    }
+
+    if(doctor) {
+        return run_local_diagnostics(json);
     }
 
     return psx_server_run(&config) == 0 ? 0 : 1;

@@ -10,6 +10,7 @@ Usage: python3 tests/integration/test_e2e.py [--build DIR] [--verbose]
 """
 
 import argparse
+import json
 import os
 import signal
 import socket
@@ -24,7 +25,7 @@ HEADER_SIZE = 16
 MAX_PAYLOAD = 65536
 
 (HELLO, HELLO_ACK, OPEN, OPEN_OK, CLOSE, STDIN, STDOUT, STDERR, RESIZE, SIGNAL,
- EXEC, EXIT, PING, PONG) = range(1, 15)
+ EXEC, EXIT, PING, PONG, DIAG_REQUEST, DIAG_DATA, DIAG_DONE) = range(1, 18)
 
 (ACK_OK, ACK_AUTH_REQUIRED, ACK_AUTH_FAILED, ACK_SERVER_BUSY) = (0, 1, 2, 3)
 (EXIT_PROCESS, EXIT_SHELL) = (0, 1)
@@ -243,6 +244,23 @@ class Client:
                 continue
             chunks.append(payload.decode(errors="replace"))
         return "".join(chunks)
+
+    def diag(self, json_mode=False, timeout=30.0):
+        """Requests a diagnostic report; returns (text, overall status)."""
+        self.send(DIAG_REQUEST, b"\x01" if json_mode else b"\x00")
+        chunks = []
+        deadline = time.time() + timeout
+
+        while time.time() < deadline:
+            header, payload = self.read_frame(
+                timeout=max(0.1, deadline - time.time()))
+            if header[0] == DIAG_DATA:
+                chunks.append(payload.decode(errors="replace"))
+            elif header[0] == DIAG_DONE:
+                status = payload[0] if payload else None
+                return "".join(chunks), status
+
+        raise ProtocolError("no DIAG_DONE received")
 
     def execute(self, command, timeout=10.0, eof=False):
         """EXEC a line; returns (stdout+stderr, status, kinds).
@@ -619,6 +637,97 @@ def test_pipe_tty_forced_pty():
         client.close()
 
 
+def test_doctor_human():
+    with Daemon() as daemon:
+        client = Client(daemon)
+        client.drain()
+
+        text, status = client.diag()
+        check(status == 0, "doctor overall status %r (want 0/READY)" % status)
+        for marker in ("PSXTerm diagnostics", "Platform:", "Protocol:", "TTY",
+                       "Process execution", "cli_test located", "spawn",
+                       "stdio separation", "SIGINT", "Result:", "READY"):
+            check(marker in text, "doctor output missing %r:\n%s" % (marker, text))
+
+        client.close()
+
+
+def test_doctor_json():
+    with Daemon() as daemon:
+        client = Client(daemon)
+        client.drain()
+
+        text, status = client.diag(json_mode=True)
+        check(status == 0, "doctor json status %r" % status)
+
+        data = json.loads(text)
+        check(data["result"] == "READY", "json result %r" % data["result"])
+        check(data["protocol"] == "PTTY/1", "json protocol %r" % data["protocol"])
+        check(len(data["groups"]) >= 5, "json groups missing")
+
+        checks = [c for g in data["groups"] for c in g["checks"]]
+        check(len(checks) >= 30, "json checks missing: %d" % len(checks))
+        check(any(c["name"] == "session" and c["status"] == "PASS"
+                  for c in checks), "session checks missing in json")
+        check(any(c["name"] == "socket" and c["status"] == "PASS"
+                  for c in checks), "socket check missing in json")
+        check(any(c["name"] == "frames" for c in checks), "frame counters missing")
+
+        client.close()
+
+
+def test_doctor_reports_busy_session():
+    with Daemon() as daemon:
+        client = Client(daemon)
+        client.drain()
+
+        client.send(EXEC, b"sleep 30")
+        time.sleep(0.4)
+
+        text, status = client.diag()
+        check(status == 2, "busy doctor status %r (want 2)" % status)
+        check("foreground process is running" in text,
+              "busy notice missing: %r" % text)
+
+        client.send(SIGNAL, bytes([signal.SIGINT]))
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            header, payload = client.read_frame()
+            if header[0] == EXIT and len(payload) >= 5 and payload[4] == EXIT_SHELL:
+                break
+
+        client.close()
+
+
+def test_doctor_client_binary():
+    with Daemon() as daemon:
+        client = Client(daemon)
+        client.drain()
+        client.close()
+
+        human = subprocess.run(
+            [os.path.join(BUILD, "psxterm"), "doctor", "127.0.0.1",
+             "-p", str(daemon.port)],
+            capture_output=True, text=True, timeout=60)
+        check(human.returncode == 0,
+              "doctor client rc=%d stderr=%s" % (human.returncode, human.stderr))
+        check("PSXTerm diagnostics" in human.stdout, "doctor client output empty")
+        check("Result:" in human.stdout and "READY" in human.stdout,
+              "doctor client result missing")
+
+        machine = subprocess.run(
+            [os.path.join(BUILD, "psxterm"), "doctor", "--json",
+             "127.0.0.1", "-p", str(daemon.port)],
+            capture_output=True, text=True, timeout=60)
+        check(machine.returncode == 0,
+              "doctor --json rc=%d stderr=%s" % (machine.returncode,
+                                                 machine.stderr))
+        data = json.loads(machine.stdout)
+        check(data["result"] == "READY", "doctor --json result %r" % data["result"])
+        check(machine.stdout.lstrip().startswith("{"),
+              "doctor --json output is not pure JSON")
+
+
 def test_handshake_timeout():
     with Daemon("--handshake-timeout", "300") as daemon:
         sock = socket.create_connection(("127.0.0.1", daemon.port), 3.0)
@@ -687,6 +796,10 @@ TESTS = [
     test_interrupt_via_signal_frame,
     test_pipe_tty_fallback,
     test_pipe_tty_forced_pty,
+    test_doctor_human,
+    test_doctor_json,
+    test_doctor_reports_busy_session,
+    test_doctor_client_binary,
     test_handshake_timeout,
     test_idle_timeout,
     test_disconnect_stress_and_fd_leak,

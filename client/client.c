@@ -21,11 +21,13 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include "psxterm/diag.h"
 #include "psxterm/protocol.h"
 #include "psxterm/util.h"
 #include "psxterm/version.h"
 
 #define CLIENT_NAME "psxterm/" PSXTERM_VERSION_STRING
+#define EXIT_USAGE 64
 
 static struct termios g_saved_termios;
 static bool g_raw_mode;
@@ -454,10 +456,98 @@ run_interactive(int fd, ptty_reader_t *reader, bool use_raw)
     return 0;
 }
 
+/* PING/PONG roundtrip used by the doctor to validate the live connection. */
+static int
+doctor_ping(int fd, ptty_reader_t *reader, int timeout_ms)
+{
+    static const char token[] = "psxterm-doctor";
+    ptty_header_t header;
+    const uint8_t *payload = NULL;
+    uint64_t deadline = psx_now_ms() + (uint64_t)timeout_ms;
+
+    if(send_frame(fd, PTTY_MSG_PING, token, sizeof(token) - 1) < 0) {
+        return -1;
+    }
+
+    while(psx_now_ms() < deadline) {
+        if(wait_frame(reader, fd, &header, &payload,
+                      (int)(deadline - psx_now_ms())) != 0) {
+            return -1;
+        }
+
+        if(header.type == PTTY_MSG_PONG) {
+            return header.payload_length == sizeof(token) - 1 &&
+                           memcmp(payload, token, sizeof(token) - 1) == 0
+                       ? 0
+                       : -1;
+        }
+        if(header.type == PTTY_MSG_CLOSE) {
+            return -1;
+        }
+    }
+
+    return -1;
+}
+
+/*
+ * Doctor mode: stream the remote diagnostic report to stdout and exit with
+ * the server's overall status (0 ready, 1 warnings, 2 not ready).
+ */
+static int
+run_doctor(int fd, ptty_reader_t *reader, bool json)
+{
+    uint8_t flags = json ? PTTY_DIAG_FLAG_JSON : 0;
+    ptty_header_t header;
+    const uint8_t *payload = NULL;
+
+    if(doctor_ping(fd, reader, 2000) < 0) {
+        fprintf(stderr, "psxterm: PING/PONG roundtrip failed\n");
+        return PSX_DIAG_EXIT_FAILED;
+    }
+
+    if(send_frame(fd, PTTY_MSG_DIAG_REQUEST, &flags, 1) < 0) {
+        fprintf(stderr, "psxterm: cannot request diagnostics: %s\n",
+                strerror(errno));
+        return PSX_DIAG_EXIT_FAILED;
+    }
+
+    for(;;) {
+        if(wait_frame(reader, fd, &header, &payload, 60000) != 0) {
+            fprintf(stderr, "psxterm: diagnostics timed out\n");
+            return PSX_DIAG_EXIT_FAILED;
+        }
+
+        switch(header.type) {
+        case PTTY_MSG_DIAG_DATA:
+            write_all(STDOUT_FILENO, payload, header.payload_length);
+            break;
+
+        case PTTY_MSG_DIAG_DONE: {
+            int status = header.payload_length >= 1 ? payload[0]
+                                                    : PSX_DIAG_EXIT_FAILED;
+
+            send_frame(fd, PTTY_MSG_CLOSE, NULL, 0);
+            return status;
+        }
+
+        case PTTY_MSG_PING:
+            send_frame(fd, PTTY_MSG_PONG, payload, header.payload_length);
+            break;
+
+        case PTTY_MSG_CLOSE:
+            return PSX_DIAG_EXIT_FAILED;
+
+        default:
+            break;
+        }
+    }
+}
+
 static void
 usage(const char *argv0)
 {
     printf("usage: %s [options] <host>\n", argv0);
+    printf("       %s doctor [--json] [options] <host>\n", argv0);
     printf("\n");
     printf("Connect to a PSXTerm daemon on a PS4/PS5.\n");
     printf("\n");
@@ -465,6 +555,9 @@ usage(const char *argv0)
     printf("  -t, --token TOKEN  authentication token\n");
     printf("  -e, --exec CMD     run one command and exit\n");
     printf("      --no-raw       do not switch the local terminal to raw mode\n");
+    printf("      doctor         run remote diagnostics (exit 0 ready, 1\n");
+    printf("                     warnings, 2 not ready)\n");
+    printf("      --json         machine-readable diagnostics output\n");
     printf("  -V, --version      print version\n");
     printf("  -h, --help         this help\n");
 }
@@ -477,6 +570,8 @@ main(int argc, char **argv)
     const char *exec_command = NULL;
     const char *host = NULL;
     bool use_raw = true;
+    bool doctor_mode = false;
+    bool json = false;
     int fd;
     ptty_reader_t reader;
     ptty_header_t header;
@@ -490,20 +585,24 @@ main(int argc, char **argv)
         if(strcmp(arg, "-p") == 0 || strcmp(arg, "--port") == 0) {
             if(++i >= argc || !psx_parse_u16(argv[i], &port) || port == 0) {
                 fprintf(stderr, "psxterm: invalid port\n");
-                return 2;
+                return EXIT_USAGE;
             }
         } else if(strcmp(arg, "-t") == 0 || strcmp(arg, "--token") == 0) {
             if(++i >= argc) {
-                return 2;
+                return EXIT_USAGE;
             }
             token = argv[i];
         } else if(strcmp(arg, "-e") == 0 || strcmp(arg, "--exec") == 0) {
             if(++i >= argc) {
-                return 2;
+                return EXIT_USAGE;
             }
             exec_command = argv[i];
         } else if(strcmp(arg, "--no-raw") == 0) {
             use_raw = false;
+        } else if(strcmp(arg, "--json") == 0) {
+            json = true;
+        } else if(strcmp(arg, "doctor") == 0 && !host) {
+            doctor_mode = true;
         } else if(strcmp(arg, "-V") == 0 || strcmp(arg, "--version") == 0) {
             printf("psxterm %s (protocol %s)\n", PSXTERM_VERSION_STRING,
                    PSXTERM_PROTOCOL_NAME);
@@ -514,18 +613,18 @@ main(int argc, char **argv)
         } else if(arg[0] == '-') {
             fprintf(stderr, "psxterm: unknown option: %s\n", arg);
             usage(argv[0]);
-            return 2;
+            return EXIT_USAGE;
         } else if(!host) {
             host = arg;
         } else {
             fprintf(stderr, "psxterm: unexpected argument: %s\n", arg);
-            return 2;
+            return EXIT_USAGE;
         }
     }
 
     if(!host) {
         usage(argv[0]);
-        return 2;
+        return EXIT_USAGE;
     }
 
     /* Writes to a closed server socket must fail with EPIPE, not kill us. */
@@ -582,7 +681,7 @@ main(int argc, char **argv)
         text[len] = '\0';
 
         sep = strchr(text, '|');
-        if(sep) {
+        if(sep && !json) {
             *sep = '\0';
             if(strcmp(text, "PS5") == 0) {
                 printf("Connected to PlayStation 5\n");
@@ -624,6 +723,16 @@ main(int argc, char **argv)
     }
 
     psx_set_nonblocking(fd, true);
+
+    if(doctor_mode) {
+        int status;
+
+        fflush(stdout);
+        status = run_doctor(fd, &reader, json);
+        close(fd);
+
+        return status;
+    }
 
     if(exec_command) {
         int status = run_exec(fd, &reader, exec_command);

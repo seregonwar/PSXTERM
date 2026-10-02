@@ -21,6 +21,12 @@ const char *psx_platform_id(void);
 /* Kernel/platform description used by `uname`. */
 const char *psx_platform_uname(void);
 
+/*
+ * Console firmware version when it can be discovered reliably, otherwise
+ * NULL. Diagnostics report NULL as UNKNOWN; callers must not guess.
+ */
+const char *psx_platform_firmware(void);
+
 /* Default PATH for new sessions. */
 const char *psx_platform_default_path(void);
 

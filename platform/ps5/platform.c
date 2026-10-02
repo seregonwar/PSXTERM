@@ -34,6 +34,16 @@ psx_platform_uname(void)
 }
 
 const char *
+psx_platform_firmware(void)
+{
+    /*
+     * The PS5 firmware version is not exposed through a reliable payload-side
+     * interface; reporting a guessed value would be worse than UNKNOWN.
+     */
+    return NULL;
+}
+
+const char *
 psx_platform_default_path(void)
 {
     return "/data/psxterm/bin";

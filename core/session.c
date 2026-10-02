@@ -9,6 +9,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "psxterm/diag.h"
 #include "psxterm/log.h"
 #include "psxterm/platform.h"
 #include "psxterm/protocol.h"
@@ -93,6 +94,8 @@ psx_session_emit(psx_session_t *session, uint8_t type, const void *data, size_t 
         errno = ENOBUFS;
         return -1;
     }
+
+    session->frames_out++;
 
     do {
         size_t chunk = len - offset;
@@ -715,6 +718,53 @@ psx_session_handle_frame(psx_session_t *session, const ptty_header_t *header,
             }
         }
         return 0;
+
+    case PTTY_MSG_DIAG_REQUEST: {
+        uint8_t flags = header->payload_length >= 1 ? payload[0] : 0;
+        psx_diag_report_t report;
+        psx_diag_status_t overall;
+        char *text;
+        size_t needed;
+        int exit_code;
+
+        if(session->proc.running) {
+            static const char busy[] =
+                "[PSXTerm: a foreground process is running; diagnostics need "
+                "an idle session]\n";
+            uint8_t code = PSX_DIAG_EXIT_FAILED;
+
+            psx_session_emit(session, PTTY_MSG_DIAG_DATA, busy,
+                             sizeof(busy) - 1);
+            psx_session_emit(session, PTTY_MSG_DIAG_DONE, &code, 1);
+            return 0;
+        }
+
+        psx_diag_report_init(&report);
+        psx_diag_run(&report, session);
+
+        needed = (flags & PTTY_DIAG_FLAG_JSON)
+                     ? psx_diag_format_json(&report, NULL, 0)
+                     : psx_diag_format_human(&report, NULL, 0);
+
+        if((text = malloc(needed + 1))) {
+            if(flags & PTTY_DIAG_FLAG_JSON) {
+                psx_diag_format_json(&report, text, needed + 1);
+            } else {
+                psx_diag_format_human(&report, text, needed + 1);
+            }
+
+            psx_session_emit(session, PTTY_MSG_DIAG_DATA, text, needed);
+            free(text);
+        }
+
+        overall = psx_diag_overall_status(&report);
+        exit_code = psx_diag_exit_code(overall);
+        psx_diag_report_free(&report);
+
+        psx_session_emit(session, PTTY_MSG_DIAG_DONE,
+                         (uint8_t *)&exit_code, 1);
+        return 0;
+    }
 
     case PTTY_MSG_PING:
         return psx_session_emit(session, PTTY_MSG_PONG, payload,

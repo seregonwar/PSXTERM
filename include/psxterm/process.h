@@ -39,6 +39,41 @@ typedef struct {
 pid_t psx_spawn(const psx_spawn_options_t *options);
 
 /*
+ * Stages a spawn attempt passes through. Backends advance the stage as they
+ * work so a failure can be attributed to a specific step instead of a single
+ * "spawn failed" message. Each backend uses the stages it actually performs;
+ * for example the host backend never attaches to a victim process.
+ */
+typedef enum {
+    PSX_SPAWN_STAGE_PREPARE = 0,
+    PSX_SPAWN_STAGE_CREATE_VICTIM,
+    PSX_SPAWN_STAGE_ATTACH,
+    PSX_SPAWN_STAGE_RAISE_PRIVILEGES,
+    PSX_SPAWN_STAGE_DUP_STDIO,
+    PSX_SPAWN_STAGE_LOAD_ELF,
+    PSX_SPAWN_STAGE_RELOCATE,
+    PSX_SPAWN_STAGE_SET_REGISTERS,
+    PSX_SPAWN_STAGE_DETACH,
+    PSX_SPAWN_STAGE_RUNNING
+} psx_spawn_stage_t;
+
+typedef struct {
+    psx_spawn_stage_t stage;
+    int error_code; /* errno-style code, 0 when unknown */
+    char detail[128]; /* short, non-sensitive description */
+} psx_spawn_failure_t;
+
+const char *psx_spawn_stage_name(psx_spawn_stage_t stage);
+
+/*
+ * Like psx_spawn(), but reports the stage, error code and a short detail for
+ * a failed attempt. `failure` may be NULL. On success the failure stage is
+ * PSX_SPAWN_STAGE_RUNNING.
+ */
+pid_t psx_spawn_ex(const psx_spawn_options_t *options,
+                   psx_spawn_failure_t *failure);
+
+/*
  * Reap a child.
  *   timeout_ms < 0  : block until the child exits
  *   timeout_ms == 0 : poll
@@ -53,7 +88,8 @@ bool psx_process_backend_available(void);
 const char *psx_process_backend_name(void);
 
 /* --- platform hooks, implemented under platform/<plat>/process.c -------- */
-pid_t psx_platform_spawn(const psx_spawn_options_t *options);
+pid_t psx_platform_spawn(const psx_spawn_options_t *options,
+                         psx_spawn_failure_t *failure);
 int psx_platform_process_wait(pid_t pid, int *status_out, int timeout_ms);
 int psx_platform_process_kill(pid_t pid, int sig);
 bool psx_platform_process_available(void);

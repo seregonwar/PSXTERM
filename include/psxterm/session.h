@@ -64,6 +64,11 @@ typedef struct psx_session {
 
     bool exec_pending;
 
+    /* Diagnostic counters (frames exchanged on this session's socket). */
+    uint64_t frames_in;
+    uint64_t frames_out;
+    uint32_t protocol_errors;
+
     /* PipeTTY only: input was shut down to deliver EOF, so the tty must be
      * recreated before the next process is spawned. */
     bool tty_input_closed;

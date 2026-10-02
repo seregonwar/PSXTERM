@@ -40,6 +40,13 @@ psx_platform_uname(void)
 }
 
 const char *
+psx_platform_firmware(void)
+{
+    /* A development host has no console firmware to report. */
+    return NULL;
+}
+
+const char *
 psx_platform_default_path(void)
 {
     const char *path = getenv("PATH");

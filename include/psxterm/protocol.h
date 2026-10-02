@@ -47,8 +47,19 @@ typedef enum {
     PTTY_MSG_EXEC = 11,
     PTTY_MSG_EXIT = 12,
     PTTY_MSG_PING = 13,
-    PTTY_MSG_PONG = 14
+    PTTY_MSG_PONG = 14,
+    /*
+     * Diagnostics: the client requests a report, the server streams it as
+     * DIAG_DATA frames (chunked when necessary) and finishes with a DIAG_DONE
+     * frame carrying the overall status.
+     */
+    PTTY_MSG_DIAG_REQUEST = 15,
+    PTTY_MSG_DIAG_DATA = 16,
+    PTTY_MSG_DIAG_DONE = 17
 } ptty_msg_type_t;
+
+/* DIAG_REQUEST flags */
+#define PTTY_DIAG_FLAG_JSON 0x01u
 
 /* Status byte of HELLO_ACK. */
 enum {

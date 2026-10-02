@@ -33,6 +33,7 @@ main(int argc, char **argv)
     print_env("TERM");
     print_env("PATH");
     print_env("PSXTERM");
+    print_env("PSXTERM_DOCTOR");
     print_env("USER");
 
     printf("isatty: stdin=%d stdout=%d stderr=%d\n", isatty(0) ? 1 : 0,

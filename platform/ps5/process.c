@@ -24,6 +24,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -697,8 +698,82 @@ set_heap_size(pid_t pid, int size)
 /* public API                                                         */
 /* ------------------------------------------------------------------ */
 
+static void
+stage_set(psx_spawn_failure_t *failure, psx_spawn_stage_t stage, int error_code,
+          const char *detail)
+{
+    if(!failure) {
+        return;
+    }
+
+    failure->stage = stage;
+    failure->error_code = error_code;
+    failure->detail[0] = '\0';
+
+    if(detail) {
+        snprintf(failure->detail, sizeof(failure->detail), "%s", detail);
+    }
+}
+
+/*
+ * Duplicate the daemon-owned stdio descriptors into the victim process.
+ * Distinct stdin/stdout/stderr descriptors are honored so diagnostics can
+ * verify that the streams really are separate.
+ */
+static int
+dup_stdio(pid_t pid, pid_t owner, const psx_spawn_options_t *options,
+          psx_spawn_failure_t *failure)
+{
+    int in_fd;
+    int out_fd;
+    int err_fd;
+
+    if((in_fd = pt_rdup(pid, owner, options->stdin_fd)) < 0) {
+        stage_set(failure, PSX_SPAWN_STAGE_DUP_STDIO, errno,
+                  "stdin duplication failed");
+        return -1;
+    }
+
+    out_fd = options->stdout_fd == options->stdin_fd
+                 ? in_fd
+                 : pt_rdup(pid, owner, options->stdout_fd);
+    err_fd = options->stderr_fd == options->stdin_fd
+                 ? in_fd
+                 : (options->stderr_fd == options->stdout_fd
+                        ? out_fd
+                        : pt_rdup(pid, owner, options->stderr_fd));
+
+    if(out_fd < 0 || err_fd < 0) {
+        stage_set(failure, PSX_SPAWN_STAGE_DUP_STDIO, errno,
+                  "stdout/stderr duplication failed");
+        pt_close(pid, in_fd);
+        if(out_fd >= 0 && out_fd != in_fd) {
+            pt_close(pid, out_fd);
+        }
+        return -1;
+    }
+
+    pt_close(pid, STDIN_FILENO);
+    pt_close(pid, STDOUT_FILENO);
+    pt_close(pid, STDERR_FILENO);
+    pt_dup2(pid, in_fd, STDIN_FILENO);
+    pt_dup2(pid, out_fd, STDOUT_FILENO);
+    pt_dup2(pid, err_fd, STDERR_FILENO);
+
+    if(out_fd != in_fd) {
+        pt_close(pid, out_fd);
+    }
+    if(err_fd != in_fd && err_fd != out_fd) {
+        pt_close(pid, err_fd);
+    }
+    pt_close(pid, in_fd);
+
+    return 0;
+}
+
 pid_t
-psx_platform_spawn(const psx_spawn_options_t *options)
+psx_platform_spawn(const psx_spawn_options_t *options,
+                   psx_spawn_failure_t *failure)
 {
     static const uint8_t int3 = 0xcc;
     struct ps5_spawn_context ctx;
@@ -713,30 +788,39 @@ psx_platform_spawn(const psx_spawn_options_t *options)
     uint8_t *stack;
     pid_t pid;
     pid_t mypid = getpid();
-    int stdio_fd;
     int attempts;
 
+    stage_set(failure, PSX_SPAWN_STAGE_PREPARE, 0, NULL);
+
     if(!options->stdin_fd && !options->stdout_fd) {
+        stage_set(failure, PSX_SPAWN_STAGE_PREPARE, EINVAL,
+                  "no stdio descriptors");
         errno = EINVAL;
         return -1;
     }
 
     if(!(elf = read_file(options->path, &elf_size))) {
+        stage_set(failure, PSX_SPAWN_STAGE_PREPARE, errno,
+                  "cannot read the executable");
         return -1;
     }
 
     if(elf_sanity_check(elf, elf_size) != 0) {
+        stage_set(failure, PSX_SPAWN_STAGE_PREPARE, ENOEXEC,
+                  "not a valid ELF64 payload");
         free(elf);
         errno = ENOEXEC;
         return -1;
     }
 
     if(!(stack = malloc(PAGE_SIZE))) {
+        stage_set(failure, PSX_SPAWN_STAGE_PREPARE, errno, "out of memory");
         free(elf);
         return -1;
     }
 
     if(!(child_ctx = malloc(sizeof(*child_ctx)))) {
+        stage_set(failure, PSX_SPAWN_STAGE_PREPARE, errno, "out of memory");
         free(stack);
         free(elf);
         return -1;
@@ -747,17 +831,12 @@ psx_platform_spawn(const psx_spawn_options_t *options)
     ctx.path = PS5_EBOOT;
     *child_ctx = ctx;
 
+    stage_set(failure, PSX_SPAWN_STAGE_CREATE_VICTIM, 0, NULL);
+
     if((pid = rfork_thread(RFPROC | RFCFDG | RFMEM, stack + PAGE_SIZE - 8,
                            ps5_rfork_entry, child_ctx)) < 0) {
-        free(child_ctx);
-        free(stack);
-        free(elf);
-        return -1;
-    }
-
-    /* Wait for the child to reach the exec stop. */
-    if(waitpid(pid, 0, 0) < 0) {
-        PSX_LOGE("ps5: waitpid: %s", strerror(errno));
+        stage_set(failure, PSX_SPAWN_STAGE_CREATE_VICTIM, errno,
+                  "rfork_thread failed");
         free(child_ctx);
         free(stack);
         free(elf);
@@ -767,11 +846,25 @@ psx_platform_spawn(const psx_spawn_options_t *options)
     free(child_ctx);
     free(stack);
 
+    stage_set(failure, PSX_SPAWN_STAGE_ATTACH, 0, NULL);
+
+    /* Wait for the child to reach the exec stop. */
+    if(waitpid(pid, 0, 0) < 0) {
+        stage_set(failure, PSX_SPAWN_STAGE_ATTACH, errno,
+                  "victim exec wait failed");
+        PSX_LOGE("ps5: waitpid: %s", strerror(errno));
+        kill(pid, SIGKILL);
+        free(elf);
+        return -1;
+    }
+
     for(attempts = 0; attempts < 100; attempts++) {
         if(pt_attach(pid) == 0) {
             break;
         }
         if(errno != EBUSY) {
+            stage_set(failure, PSX_SPAWN_STAGE_ATTACH, errno,
+                      "pt_attach failed");
             PSX_LOGE("ps5: pt_attach: %s", strerror(errno));
             kill(pid, SIGKILL);
             free(elf);
@@ -780,6 +873,8 @@ psx_platform_spawn(const psx_spawn_options_t *options)
         sched_yield();
     }
     if(attempts == 100) {
+        stage_set(failure, PSX_SPAWN_STAGE_ATTACH, EBUSY,
+                  "pt_attach kept returning EBUSY");
         PSX_LOGE("ps5: pt_attach kept returning EBUSY");
         kill(pid, SIGKILL);
         free(elf);
@@ -794,8 +889,12 @@ psx_platform_spawn(const psx_spawn_options_t *options)
 
     set_heap_size(pid, -1);
 
+    stage_set(failure, PSX_SPAWN_STAGE_SET_REGISTERS, 0, NULL);
+
     /* Step past the eboot's own startup (libc initialisation). */
     if(!(brkpoint = kernel_dynlib_entry_addr(pid, 0))) {
+        stage_set(failure, PSX_SPAWN_STAGE_SET_REGISTERS, ENOENT,
+                  "cannot locate the eboot entry");
         PSX_LOGE("ps5: cannot locate the eboot entry");
         pt_detach(pid, SIGKILL);
         free(elf);
@@ -805,6 +904,8 @@ psx_platform_spawn(const psx_spawn_options_t *options)
 
     if(kernel_mprotect(pid, brkpoint, PAGE_SIZE,
                        PROT_READ | PROT_WRITE | PROT_EXEC)) {
+        stage_set(failure, PSX_SPAWN_STAGE_SET_REGISTERS, errno,
+                  "cannot make the eboot entry writable");
         PSX_LOGE("ps5: mprotect(entry) failed");
         pt_detach(pid, SIGKILL);
         free(elf);
@@ -813,6 +914,8 @@ psx_platform_spawn(const psx_spawn_options_t *options)
 
     if(pt_copyout(pid, brkpoint, &original_byte, sizeof(original_byte)) ||
        pt_copyin(pid, &int3, brkpoint, sizeof(int3))) {
+        stage_set(failure, PSX_SPAWN_STAGE_SET_REGISTERS, errno,
+                  "cannot set the entry breakpoint");
         PSX_LOGE("ps5: cannot set the entry breakpoint");
         pt_detach(pid, SIGKILL);
         free(elf);
@@ -820,6 +923,8 @@ psx_platform_spawn(const psx_spawn_options_t *options)
     }
 
     if(pt_continue(pid, SIGCONT) || waitpid(pid, 0, 0) == -1) {
+        stage_set(failure, PSX_SPAWN_STAGE_SET_REGISTERS, errno,
+                  "continue to the eboot entry failed");
         PSX_LOGE("ps5: continue to entry failed");
         pt_detach(pid, SIGKILL);
         free(elf);
@@ -827,29 +932,28 @@ psx_platform_spawn(const psx_spawn_options_t *options)
     }
 
     if(pt_copyin(pid, &original_byte, brkpoint, sizeof(original_byte))) {
+        stage_set(failure, PSX_SPAWN_STAGE_SET_REGISTERS, errno,
+                  "cannot restore the eboot entry byte");
         pt_detach(pid, SIGKILL);
         free(elf);
         return -1;
     }
 
     /* Wire stdio to the session tty before starting the payload. */
-    stdio_fd = pt_rdup(pid, mypid, options->stdin_fd);
-    if(stdio_fd < 0) {
-        PSX_LOGE("ps5: cannot duplicate the session fd: %s", strerror(errno));
+    stage_set(failure, PSX_SPAWN_STAGE_DUP_STDIO, 0, NULL);
+
+    if(dup_stdio(pid, mypid, options, failure) < 0) {
+        PSX_LOGE("ps5: stdio duplication failed: %s", strerror(errno));
         pt_detach(pid, SIGKILL);
         free(elf);
         return -1;
     }
 
-    pt_close(pid, STDIN_FILENO);
-    pt_close(pid, STDOUT_FILENO);
-    pt_close(pid, STDERR_FILENO);
-    pt_dup2(pid, stdio_fd, STDIN_FILENO);
-    pt_dup2(pid, stdio_fd, STDOUT_FILENO);
-    pt_dup2(pid, stdio_fd, STDERR_FILENO);
-    pt_close(pid, stdio_fd);
+    stage_set(failure, PSX_SPAWN_STAGE_LOAD_ELF, 0, NULL);
 
     if(!(entry = load_elf(pid, elf, elf_size))) {
+        stage_set(failure, PSX_SPAWN_STAGE_LOAD_ELF, errno,
+                  "payload mapping, copy or relocation failed");
         PSX_LOGE("ps5: ELF load failed: %s", strerror(errno));
         pt_detach(pid, SIGKILL);
         free(elf);
@@ -860,7 +964,11 @@ psx_platform_spawn(const psx_spawn_options_t *options)
         PSX_LOGW("ps5: payload arguments unavailable, starting without them");
     }
 
+    stage_set(failure, PSX_SPAWN_STAGE_SET_REGISTERS, 0, NULL);
+
     if(pt_getregs(pid, &regs)) {
+        stage_set(failure, PSX_SPAWN_STAGE_SET_REGISTERS, errno,
+                  "pt_getregs failed");
         pt_detach(pid, SIGKILL);
         free(elf);
         return -1;
@@ -872,12 +980,17 @@ psx_platform_spawn(const psx_spawn_options_t *options)
     regs.r_rdi = (uint64_t)args;
 
     if(pt_setregs(pid, &regs)) {
+        stage_set(failure, PSX_SPAWN_STAGE_SET_REGISTERS, errno,
+                  "pt_setregs failed");
         pt_detach(pid, SIGKILL);
         free(elf);
         return -1;
     }
 
+    stage_set(failure, PSX_SPAWN_STAGE_DETACH, 0, NULL);
+
     if(pt_detach(pid, 0)) {
+        stage_set(failure, PSX_SPAWN_STAGE_DETACH, errno, "pt_detach failed");
         PSX_LOGE("ps5: pt_detach: %s", strerror(errno));
         kill(pid, SIGKILL);
         free(elf);
@@ -885,6 +998,8 @@ psx_platform_spawn(const psx_spawn_options_t *options)
     }
 
     free(elf);
+
+    stage_set(failure, PSX_SPAWN_STAGE_RUNNING, 0, NULL);
 
     return pid;
 }
