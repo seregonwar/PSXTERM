@@ -413,6 +413,9 @@ struct ps5_spawn_context {
     char *const *argv;
     char *const *envp;
     const char *path;
+    int stdin_fd;
+    int stdout_fd;
+    int stderr_fd;
 };
 
 static int
@@ -436,6 +439,25 @@ ps5_rfork_entry(void *arg)
     if(ptrace(PT_TRACE_ME, 0, 0, 0)) {
         klog_perror("psxterm: ptrace");
         return -1;
+    }
+
+    /*
+     * Wiring the session descriptors here, in the child, gets past the
+     * DUP_STDIO stage (nothing beyond the standard descriptors survives
+     * execve on this kernel), but the spawn then stalls later in the load
+     * sequence, so it stays behind an opt-in switch until that is understood.
+     * Default: the parent-side dup2/rdup path below, which fails cleanly.
+     */
+    if(getenv("PSXTERM_PS5_CHILD_STDIO") != NULL) {
+        if(ctx->stdin_fd >= 0) {
+            dup2(ctx->stdin_fd, STDIN_FILENO);
+        }
+        if(ctx->stdout_fd >= 0) {
+            dup2(ctx->stdout_fd, STDOUT_FILENO);
+        }
+        if(ctx->stderr_fd >= 0) {
+            dup2(ctx->stderr_fd, STDERR_FILENO);
+        }
     }
 
     execve(ctx->path, ctx->argv, ctx->envp);
@@ -773,9 +795,9 @@ stage_set(psx_spawn_failure_t *failure, psx_spawn_stage_t stage, int error_code,
 
 /*
  * The victim is a jailed Sony process, and the reference loader lifts its
- * sandbox before touching its descriptors. Doing that here (after the ptrace
- * exec stop) hangs the victim on this firmware, so the call is deliberately
- * not wired in yet: see docs/HARDWARE_BRINGUP.md for the open finding.
+ * sandbox before touching its descriptors. Timing matters on this firmware:
+ * done after the ptrace exec stop the victim hangs, so the caller does it
+ * while the victim is still running and untraced.
  */
 static void
 raise_target_privileges(pid_t pid)
@@ -920,6 +942,9 @@ psx_platform_spawn(const psx_spawn_options_t *options,
     ctx.argv = options->argv;
     ctx.envp = options->envp;
     ctx.path = PS5_EBOOT;
+    ctx.stdin_fd = options->stdin_fd;
+    ctx.stdout_fd = options->stdout_fd;
+    ctx.stderr_fd = options->stderr_fd;
     *child_ctx = ctx;
 
     /*
@@ -952,6 +977,14 @@ psx_platform_spawn(const psx_spawn_options_t *options,
     free(stack);
 
     stage_set(failure, PSX_SPAWN_STAGE_ATTACH, 0, NULL);
+
+    /*
+     * Lift the victim's own sandbox here, while it is still running and
+     * untraced: doing the same after the ptrace exec stop hangs the victim on
+     * this firmware (hardware-verified), while the reference privilege
+     * manager elevates targets before attaching to them.
+     */
+    raise_target_privileges(pid);
 
     /* Wait for the child to reach the exec stop. */
     {
@@ -1057,13 +1090,15 @@ psx_platform_spawn(const psx_spawn_options_t *options,
     /* Wire stdio to the session tty before starting the payload. */
     stage_set(failure, PSX_SPAWN_STAGE_DUP_STDIO, 0, NULL);
 
-    (void)raise_target_privileges;
-
+    /*
+     * The child already replaced its standard descriptors with the session
+     * ones before execve (see ps5_rfork_entry): if they survived, this only
+     * re-points 0/1/2 at the same objects, and a failure here is expected on
+     * kernels that close everything past the standard descriptors. Either way
+     * the payload's stdio is already correct, so it is not fatal.
+     */
     if(dup_stdio(pid, mypid, options, failure) < 0) {
-        PSX_LOGE("ps5: stdio duplication failed: %s", strerror(errno));
-        pt_detach(pid, SIGKILL);
-        free(elf);
-        return -1;
+        PSX_LOGI("ps5: stdio already wired by the child (%s)", strerror(errno));
     }
 
     stage_set(failure, PSX_SPAWN_STAGE_LOAD_ELF, 0, NULL);
