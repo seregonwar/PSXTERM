@@ -25,7 +25,12 @@ HEADER_SIZE = 16
 MAX_PAYLOAD = 65536
 
 (HELLO, HELLO_ACK, OPEN, OPEN_OK, CLOSE, STDIN, STDOUT, STDERR, RESIZE, SIGNAL,
- EXEC, EXIT, PING, PONG, DIAG_REQUEST, DIAG_DATA, DIAG_DONE) = range(1, 18)
+ EXEC, EXIT, PING, PONG, DIAG_REQUEST, DIAG_DATA, DIAG_DONE,
+ CAPS) = range(1, 19)
+
+(CAP_REAL_PTY, CAP_PIPE_TTY, CAP_EXEC, CAP_FILE_TRANSFER, CAP_SESSION_RESUME,
+ CAP_JOB_CONTROL, CAP_AUTH_CHALLENGE, CAP_COMPRESSION,
+ CAP_JSON_DIAGNOSTICS) = (1, 2, 4, 8, 16, 32, 64, 128, 256)
 
 (ACK_OK, ACK_AUTH_REQUIRED, ACK_AUTH_FAILED, ACK_SERVER_BUSY) = (0, 1, 2, 3)
 (EXIT_PROCESS, EXIT_SHELL) = (0, 1)
@@ -151,6 +156,18 @@ class Client:
 
     def send_raw(self, data):
         self.sock.sendall(data)
+
+    def read_caps(self, timeout=3.0):
+        """Reads frames until the capability advertisement arrives."""
+        deadline = time.time() + timeout
+
+        while time.time() < deadline:
+            header, payload = self.read_frame(
+                timeout=max(0.1, deadline - time.time()))
+            if header[0] == CAPS:
+                return struct.unpack("<I", payload[:4])[0]
+
+        raise ProtocolError("no CAPS frame received")
 
     def read_frame(self, timeout=None):
         if timeout is not None:
@@ -728,6 +745,111 @@ def test_doctor_client_binary():
               "doctor --json output is not pure JSON")
 
 
+def daemon_rss_kb(daemon):
+    """Resident set size of the daemon in KiB (Linux)."""
+    try:
+        with open("/proc/%d/status" % daemon.proc.pid) as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    return 0
+
+
+def test_capabilities_advertised():
+    with Daemon() as daemon:
+        client = Client(daemon)
+        caps = client.read_caps()
+
+        check(caps & CAP_EXEC, "EXEC capability not advertised: 0x%08x" % caps)
+        check(caps & CAP_JSON_DIAGNOSTICS, "JSON diagnostics not advertised")
+        check(caps & (CAP_REAL_PTY | CAP_PIPE_TTY),
+              "no tty backend advertised: 0x%08x" % caps)
+        check(caps & CAP_REAL_PTY and caps & CAP_JOB_CONTROL,
+              "real pty without job control: 0x%08x" % caps)
+        check(not (caps & CAP_COMPRESSION),
+              "COMPRESSION must not be advertised while unimplemented")
+
+        text, status = client.diag()
+        check("capabilities" in text and "job-control" in text,
+              "doctor does not report capabilities")
+        client.close()
+
+
+def test_capabilities_pipe_backend():
+    with Daemon("--tty", "pipe") as daemon:
+        client = Client(daemon)
+        caps = client.read_caps()
+
+        check(caps & CAP_PIPE_TTY, "PIPE_TTY not advertised on the fallback")
+        check(not (caps & CAP_REAL_PTY), "REAL_PTY advertised on PipeTTY")
+        check(not (caps & CAP_JOB_CONTROL),
+              "JOB_CONTROL must not be advertised on PipeTTY")
+        client.close()
+
+
+def test_input_backpressure_is_bounded():
+    with Daemon() as daemon:
+        client = Client(daemon)
+        client.drain()
+
+        # A foreground process that never reads stdin.
+        client.send(EXEC, b"sleep 30")
+        time.sleep(0.4)
+
+        baseline = daemon_rss_kb(daemon)
+        payload = b"x" * MAX_PAYLOAD
+        frame = struct.pack("<IBBHII", MAGIC, VERSION, STDIN, 0,
+                            client.session_id, MAX_PAYLOAD) + payload
+
+        client.sock.setblocking(False)
+        sent = 0
+        deadline = time.time() + 5
+        while time.time() < deadline and sent < 200:
+            try:
+                client.sock.send(frame)
+                sent += 1
+            except BlockingIOError:
+                time.sleep(0.05)
+            except OSError:
+                break
+        peak = daemon_rss_kb(daemon)
+        client.sock.setblocking(True)
+
+        check(sent > 0, "could not send any input")
+        check(peak - baseline < 8 * 1024,
+              "daemon RSS grew by %d KiB during an input flood (%d frames)"
+              % (peak - baseline, sent))
+
+        client.sock.close()
+
+        other = Client(daemon)
+        check(other.ack_status == ACK_OK, "daemon unhealthy after input flood")
+        other.close()
+
+
+def test_output_backpressure_is_bounded():
+    with Daemon() as daemon:
+        client = Client(daemon)
+        client.drain()
+
+        baseline = daemon_rss_kb(daemon)
+        client.send(EXEC, b"/usr/bin/yes")
+        time.sleep(2.0)  # never read the socket while yes floods stdout
+        peak = daemon_rss_kb(daemon)
+
+        check(peak - baseline < 24 * 1024,
+              "daemon RSS grew by %d KiB during an output flood"
+              % (peak - baseline))
+
+        client.sock.close()
+
+        other = Client(daemon)
+        check(other.ack_status == ACK_OK, "daemon unhealthy after output flood")
+        other.close()
+
+
 def test_handshake_timeout():
     with Daemon("--handshake-timeout", "300") as daemon:
         sock = socket.create_connection(("127.0.0.1", daemon.port), 3.0)
@@ -800,6 +922,10 @@ TESTS = [
     test_doctor_json,
     test_doctor_reports_busy_session,
     test_doctor_client_binary,
+    test_capabilities_advertised,
+    test_capabilities_pipe_backend,
+    test_input_backpressure_is_bounded,
+    test_output_backpressure_is_bounded,
     test_handshake_timeout,
     test_idle_timeout,
     test_disconnect_stress_and_fd_leak,

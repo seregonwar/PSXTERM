@@ -599,6 +599,42 @@ format_endpoint(const struct sockaddr *addr, socklen_t len, char *out,
 }
 
 static void
+format_capabilities(uint32_t caps, char *out, size_t out_cap)
+{
+    static const struct {
+        uint32_t bit;
+        const char *name;
+    } names[] = {
+        {PTTY_CAP_REAL_PTY, "real-pty"},
+        {PTTY_CAP_PIPE_TTY, "pipe-tty"},
+        {PTTY_CAP_EXEC, "exec"},
+        {PTTY_CAP_FILE_TRANSFER, "file-transfer"},
+        {PTTY_CAP_SESSION_RESUME, "session-resume"},
+        {PTTY_CAP_JOB_CONTROL, "job-control"},
+        {PTTY_CAP_AUTH_CHALLENGE, "auth-challenge"},
+        {PTTY_CAP_COMPRESSION, "compression"},
+        {PTTY_CAP_JSON_DIAGNOSTICS, "json-diagnostics"},
+    };
+    size_t used = 0;
+
+    out[0] = '\0';
+
+    for(size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if(!(caps & names[i].bit)) {
+            continue;
+        }
+
+        snprintf(out + used, out_cap - used, "%s%s", used ? " " : "",
+                 names[i].name);
+        used = strlen(out);
+    }
+
+    if(!used) {
+        snprintf(out, out_cap, "none");
+    }
+}
+
+static void
 check_session(psx_diag_report_t *report, const psx_session_t *session)
 {
     psx_diag_group_t *group = psx_diag_group(report, "Session");
@@ -660,6 +696,19 @@ check_session(psx_diag_report_t *report, const psx_session_t *session)
                  (unsigned long long)session->frames_in,
                  (unsigned long long)session->frames_out,
                  session->protocol_errors);
+
+    {
+        char caps[128];
+
+        format_capabilities(session->capabilities, caps, sizeof(caps));
+        psx_diag_add(group, "capabilities", PSX_DIAG_PASS, 0, "0x%08x: %s",
+                     session->capabilities, caps);
+    }
+
+    psx_diag_add(group, "backpressure", PSX_DIAG_PASS, 0,
+                 "input_events=%llu discarded_bytes=%llu",
+                 (unsigned long long)session->input_backpressure_events,
+                 (unsigned long long)session->input_discarded_bytes);
 
     psx_diag_add(group, "foreground process", PSX_DIAG_PASS, 0, "%s",
                  session->proc.running ? "running" : "none");

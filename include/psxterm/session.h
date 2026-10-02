@@ -12,6 +12,20 @@
 #define PSX_PATH_MAX 512
 #define PSX_ENV_MAX 64
 
+/*
+ * Backpressure bounds.
+ *
+ * PSX_SESSION_OUT_MAX bounds the queue towards a client that stops reading.
+ * PSX_SESSION_IN_MAX bounds the queue towards a foreground process that does
+ * not consume input; above PSX_SESSION_IN_HIGH_WATER the session stops
+ * reading from its socket so TCP backpressure reaches the client instead of
+ * growing the queue. The gap is larger than one maximum frame so a single
+ * 64 KiB STDIN frame can never push the queue past the hard limit.
+ */
+#define PSX_SESSION_OUT_MAX (8u * 1024u * 1024u)
+#define PSX_SESSION_IN_MAX (512u * 1024u)
+#define PSX_SESSION_IN_HIGH_WATER (PSX_SESSION_IN_MAX - PTTY_MAX_PAYLOAD)
+
 /* --- session environment ------------------------------------------------ */
 
 typedef struct {
@@ -68,6 +82,13 @@ typedef struct psx_session {
     uint64_t frames_in;
     uint64_t frames_out;
     uint32_t protocol_errors;
+
+    /* Capability bitmask advertised to the client (PTTY_CAP_*). */
+    uint32_t capabilities;
+
+    /* Backpressure accounting. */
+    uint64_t input_backpressure_events;
+    uint64_t input_discarded_bytes;
 
     /* PipeTTY only: input was shut down to deliver EOF, so the tty must be
      * recreated before the next process is spawned. */
@@ -132,6 +153,9 @@ int psx_session_absolute_path(const psx_session_t *session, const char *path,
                               char *out, size_t out_cap);
 
 bool psx_session_has_process(const psx_session_t *session);
+
+/* Runtime capability bitmask (PTTY_CAP_*) advertised with PTTY_MSG_CAPS. */
+uint32_t psx_session_capabilities(const psx_session_t *session);
 
 /* Queue an EXIT frame (kind: PTTY_EXIT_PROCESS or PTTY_EXIT_SHELL). */
 void psx_session_emit_exit(psx_session_t *session, int exit_code, uint8_t kind);

@@ -55,11 +55,34 @@ typedef enum {
      */
     PTTY_MSG_DIAG_REQUEST = 15,
     PTTY_MSG_DIAG_DATA = 16,
-    PTTY_MSG_DIAG_DONE = 17
+    PTTY_MSG_DIAG_DONE = 17,
+    /*
+     * Capability advertisement, sent by the server right after OPEN_OK.
+     * Clients that do not know the frame ignore it; clients talking to an
+     * older daemon simply never receive it and must assume the baseline
+     * PTTY/1 feature set instead of guessing from version strings.
+     */
+    PTTY_MSG_CAPS = 18
 } ptty_msg_type_t;
 
 /* DIAG_REQUEST flags */
 #define PTTY_DIAG_FLAG_JSON 0x01u
+
+/*
+ * Capability bitmask carried by PTTY_MSG_CAPS as a little-endian uint32.
+ * A capability is advertised only when the running system can actually
+ * provide it (for example EXEC is absent when the process backend is
+ * unavailable, and JOB_CONTROL is absent on the PipeTTY fallback).
+ */
+#define PTTY_CAP_REAL_PTY 0x00000001u
+#define PTTY_CAP_PIPE_TTY 0x00000002u
+#define PTTY_CAP_EXEC 0x00000004u
+#define PTTY_CAP_FILE_TRANSFER 0x00000008u
+#define PTTY_CAP_SESSION_RESUME 0x00000010u
+#define PTTY_CAP_JOB_CONTROL 0x00000020u
+#define PTTY_CAP_AUTH_CHALLENGE 0x00000040u
+#define PTTY_CAP_COMPRESSION 0x00000080u
+#define PTTY_CAP_JSON_DIAGNOSTICS 0x00000100u
 
 /* Status byte of HELLO_ACK. */
 enum {

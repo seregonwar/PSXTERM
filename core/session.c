@@ -113,6 +113,16 @@ psx_session_emit(psx_session_t *session, uint8_t type, const void *data, size_t 
             header.payload_length = (uint32_t)chunk;
         }
 
+        /*
+         * The bound is re-checked for every chunk so a single large emit can
+         * never overshoot the queue limit by more than one frame.
+         */
+        if(psx_buf_pending(&session->out) + PTTY_HEADER_SIZE + chunk >
+           PSX_SESSION_OUT_MAX) {
+            errno = ENOBUFS;
+            return -1;
+        }
+
         if(ptty_queue_frame(&session->out, &header,
                             chunk ? (const uint8_t *)data + offset : NULL) < 0) {
             return -1;
@@ -350,6 +360,32 @@ psx_session_resolve_path(psx_session_t *session, const char *name)
 
 /* --- session start ------------------------------------------------------ */
 
+uint32_t
+psx_session_capabilities(const psx_session_t *session)
+{
+    uint32_t caps = 0;
+
+    if(session->tty.backend == PSX_TTY_BACKEND_FREEBSD_PTY) {
+        caps |= PTTY_CAP_REAL_PTY;
+    } else if(session->tty.backend == PSX_TTY_BACKEND_PIPE) {
+        caps |= PTTY_CAP_PIPE_TTY;
+    }
+
+    /* Only advertise what this process can actually do right now. */
+    if(psx_process_backend_available()) {
+        caps |= PTTY_CAP_EXEC;
+    }
+
+    /* Job control needs terminal semantics; never faked on PipeTTY. */
+    if(session->tty.is_real_pty) {
+        caps |= PTTY_CAP_JOB_CONTROL;
+    }
+
+    caps |= PTTY_CAP_JSON_DIAGNOSTICS;
+
+    return caps;
+}
+
 int
 psx_session_begin(psx_session_t *session)
 {
@@ -383,6 +419,23 @@ psx_session_begin(psx_session_t *session)
     }
 
     session->state = PSX_SESSION_RUNNING;
+
+    /*
+     * Advertise runtime capabilities right after OPEN_OK (queued by the
+     * server before this call). Clients that do not know the frame ignore it.
+     */
+    session->capabilities = psx_session_capabilities(session);
+    {
+        uint8_t payload[4] = {
+            (uint8_t)(session->capabilities & 0xff),
+            (uint8_t)((session->capabilities >> 8) & 0xff),
+            (uint8_t)((session->capabilities >> 16) & 0xff),
+            (uint8_t)((session->capabilities >> 24) & 0xff),
+        };
+
+        psx_session_emit(session, PTTY_MSG_CAPS, payload, sizeof(payload));
+    }
+
     psh_shell_prompt(session->shell);
 
     return 0;
@@ -499,6 +552,17 @@ psx_session_check_process(psx_session_t *session)
 
     /* Drain anything the process left in the tty. */
     psx_session_on_tty_readable(session);
+
+    /*
+     * Keystrokes still queued were destined for the process that just exited.
+     * Replaying them into the next foreground process would be wrong, so they
+     * are discarded - explicitly counted, never silently.
+     */
+    if(psx_buf_pending(&session->in) > 0) {
+        session->input_discarded_bytes += psx_buf_pending(&session->in);
+        psx_buf_free(&session->in);
+        psx_buf_init(&session->in);
+    }
 
     if(session->tty_input_closed) {
         session_reopen_tty(session);
@@ -795,6 +859,17 @@ psx_session_on_socket_readable(psx_session_t *session)
         ptty_read_result_t rc;
         int handled;
 
+        /*
+         * Backpressure: while the foreground process is not consuming input,
+         * stop reading from the socket. The bytes stay in the kernel socket
+         * buffer, TCP eventually reports a zero window, and nothing is
+         * dropped. Reads resume once the tty drains below the watermark.
+         */
+        if(psx_buf_pending(&session->in) >= PSX_SESSION_IN_HIGH_WATER) {
+            session->input_backpressure_events++;
+            return 0;
+        }
+
         rc = ptty_read_frame(&session->reader, &header, &payload);
 
         if(rc == PTTY_READ_AGAIN) {
@@ -830,6 +905,20 @@ psx_session_write_tty(psx_session_t *session, const uint8_t *data, size_t len)
 {
     if(session->tty.master_fd < 0) {
         errno = ENODEV;
+        return -1;
+    }
+
+    if(psx_buf_pending(&session->in) >= PSX_SESSION_IN_HIGH_WATER) {
+        session->input_backpressure_events++;
+    }
+
+    /*
+     * Callers only reach this point below the high watermark, which already
+     * reserves room for one maximum frame; enforce the hard bound anyway so
+     * input is never silently dropped or buffered without limit.
+     */
+    if(psx_buf_pending(&session->in) + len > PSX_SESSION_IN_MAX) {
+        errno = ENOBUFS;
         return -1;
     }
 

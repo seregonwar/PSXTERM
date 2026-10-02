@@ -418,7 +418,11 @@ server_loop(psx_server_t *server)
             }
 
             server->pfds[n].fd = s->sock_fd;
-            server->pfds[n].events = POLLIN;
+            server->pfds[n].events = 0;
+            /* Backpressure: stop reading while the tty input queue is full. */
+            if(psx_buf_pending(&s->in) < PSX_SESSION_IN_HIGH_WATER) {
+                server->pfds[n].events |= POLLIN;
+            }
             if(psx_buf_pending(&s->out) > 0) {
                 server->pfds[n].events |= POLLOUT;
             }

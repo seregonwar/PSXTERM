@@ -183,6 +183,42 @@ test_manager(void)
     close(fds_c[0]);
 }
 
+static void
+test_capabilities(void)
+{
+    psx_session_t *session = make_session("/tmp");
+    psx_tty_probe_result_t probe;
+
+    /* No tty: only capabilities that do not depend on a terminal. */
+    PSX_CHECK(psx_session_capabilities(session) & PTTY_CAP_JSON_DIAGNOSTICS);
+    PSX_CHECK(!(psx_session_capabilities(session) & PTTY_CAP_JOB_CONTROL));
+
+    PSX_CHECK_EQ(psx_tty_open(&session->tty, PSX_TTY_BACKEND_PIPE, 24, 80), 0);
+    session->capabilities = psx_session_capabilities(session);
+    PSX_CHECK(session->capabilities & PTTY_CAP_PIPE_TTY);
+    PSX_CHECK(!(session->capabilities & PTTY_CAP_REAL_PTY));
+    PSX_CHECK(!(session->capabilities & PTTY_CAP_JOB_CONTROL));
+
+    psx_tty_probe(&probe);
+    if(probe.ptmx_open && probe.slave_open) {
+        psx_session_t *pty_session = make_session("/tmp");
+
+        PSX_CHECK_EQ(psx_tty_open(&pty_session->tty,
+                                  PSX_TTY_BACKEND_FREEBSD_PTY, 24, 80),
+                     0);
+        {
+            uint32_t caps = psx_session_capabilities(pty_session);
+
+            PSX_CHECK(caps & PTTY_CAP_REAL_PTY);
+            PSX_CHECK(!(caps & PTTY_CAP_PIPE_TTY));
+            PSX_CHECK(caps & PTTY_CAP_JOB_CONTROL);
+        }
+        psx_session_destroy(pty_session);
+    }
+
+    psx_session_destroy(session);
+}
+
 int
 main(void)
 {
@@ -190,6 +226,7 @@ main(void)
     test_path_overflow();
     test_resolve_path();
     test_manager();
+    test_capabilities();
 
     return PSX_TEST_SUMMARY();
 }

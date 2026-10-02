@@ -393,6 +393,7 @@ ptty_msg_name(uint8_t type)
     case PTTY_MSG_DIAG_REQUEST: return "DIAG_REQUEST";
     case PTTY_MSG_DIAG_DATA: return "DIAG_DATA";
     case PTTY_MSG_DIAG_DONE: return "DIAG_DONE";
+    case PTTY_MSG_CAPS: return "CAPS";
     default: return "UNKNOWN";
     }
 }
