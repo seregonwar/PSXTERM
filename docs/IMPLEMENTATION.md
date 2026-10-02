@@ -134,6 +134,43 @@ cycles). Development mode stays explicitly insecure and logs a warning.
 * PS4: `orbis.cmake` build -> `psxtermd`, `psxterm-ttyprobe`, `cli_test.elf`
   (BUILDS FOR PS4).
 
+## Bring-up phase (hardware validation preparation)
+
+Ordered by the hardware bring-up plan; nothing below claims console results.
+
+* **Structured diagnostics core** (`include/psxterm/diag.h`, `core/diag.c`):
+  IMPLEMENTED, HOST TESTED. Machine-readable checks with
+  PASS/FAIL/WARN/SKIP/UNKNOWN, group bookkeeping, overall result, and one
+  presentation layer for human and JSON output.
+* **Diagnostic checks**: IMPLEMENTED, HOST TESTED. Platform, filesystem
+  (unique temp-file roundtrip), TTY (reuses the runtime probe), session/socket
+  (socket endpoints, TCP_NODELAY, frame counters) and process execution.
+  The process checks run the controlled `cli_test` target through the real
+  backend three times to validate spawn, argv, quoting, environment, stdin,
+  stdout, stderr, isatty, resize, exit status, stdout/stderr separation and
+  SIGINT delivery.
+* **Spawn stage reporting**: IMPLEMENTED, HOST TESTED on the host backend,
+  BUILDS FOR PS4/PS5. `psx_spawn_ex()` reports the failing stage
+  (PREPARE, CREATE_VICTIM, ATTACH, RAISE_PRIVILEGES, DUP_STDIO, LOAD_ELF,
+  RELOCATE, SET_REGISTERS, DETACH, RUNNING), the errno and a short detail.
+  Stage semantics on consoles are HARDWARE TEST REQUIRED.
+* **`psxtermd --doctor [--json]`** (local, no client): IMPLEMENTED, HOST TESTED.
+* **`psxterm doctor [--json] <host>`** (PING/PONG liveness roundtrip, new
+  DIAG_REQUEST/DIAG_DATA/DIAG_DONE frames, exit 0/1/2): IMPLEMENTED, HOST
+  TESTED. The console path is HARDWARE TEST REQUIRED.
+* **Hardware bring-up guide** (`docs/HARDWARE_BRINGUP.md`): written, with the
+  expected diagnostic sequence, failure triage table and log collection list.
+  It deliberately contains no hardware results.
+* **CI**: host matrix (Linux/macOS) with unit tests, TTY probe, integration
+  suite, ASan/UBSan jobs and payload jobs that build with the official
+  PS4/PS5 SDK releases; docs and release workflows. Host jobs are exercised
+  locally, GitHub-hosted runs are pending the first push.
+
+Deferred by the plan until hardware bring-up succeeds: session
+detach/attach/resume, native file transfer, capability negotiation,
+challenge-response authentication, shell history/completion, job control and
+pipelines.
+
 ## Known limitations
 
 * No console has run any PSXTerm code: every PS4/PS5 runtime path is
@@ -145,3 +182,11 @@ cycles). Development mode stays explicitly insecure and logs a warning.
 * The Windows client is not implemented; the protocol and session layers are
   platform-neutral, the client is POSIX-only.
 * psh has no job control, pipes, redirection or globbing by design.
+* The event loop uses `poll()` rather than kqueue/kevent. The server section of
+  the development prompt allows a straightforward event loop first
+  ("correctness comes before cleverness"); a kqueue backend remains future
+  work and is not required for hardware bring-up.
+* `doctor` runs synchronously in the single-threaded daemon and briefly blocks
+  other sessions; it refuses to run while a foreground process is active.
+* Console firmware cannot be discovered through a reliable payload-side
+  interface, so diagnostics report it as UNKNOWN instead of guessing.

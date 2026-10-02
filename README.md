@@ -42,6 +42,10 @@ Terminology follows the project's strict rules:
 | FreeBSDPTY backend (raw /dev/ptmx + TIOCGPTN) | IMPLEMENTED, BUILD FOR PS4/PS5, HARDWARE TEST REQUIRED |
 | External execution on PS4/PS5 (elfldr-style) | IMPLEMENTED, BUILDS FOR PS4/PS5, HARDWARE TEST REQUIRED |
 | PS4/PS5 filesystem preparation | IMPLEMENTED, BUILDS FOR PS4/PS5, HARDWARE TEST REQUIRED |
+| Structured diagnostics + spawn stages | IMPLEMENTED, HOST TESTED |
+| `psxterm doctor` (local and remote, `--json`) | IMPLEMENTED, HOST TESTED |
+| Hardware bring-up guide | WRITTEN ([docs/HARDWARE_BRINGUP.md](docs/HARDWARE_BRINGUP.md)) |
+| CI: host build/tests, ASan/UBSan, PS4/PS5 SDK payload jobs | IMPLEMENTED |
 | Client on Windows | UNSUPPORTED (protocol layer is portable) |
 | Authentication | Architecture + shared-token mode IMPLEMENTED; disabled by default (insecure development mode) |
 
@@ -97,6 +101,7 @@ psxtermd                       # port 2323, authentication disabled (insecure)
 psxtermd -p 2323 --token SECRET
 psxtermd --max-sessions 4 --handshake-timeout 5000 --idle-timeout 600000
 psxtermd --tty auto|pty|pipe   # force a tty backend (debugging)
+psxtermd --doctor [--json]     # local diagnostics, no client needed
 ```
 
 From the PC:
@@ -105,7 +110,16 @@ From the PC:
 psxterm 192.168.1.50                    # interactive session
 psxterm 192.168.1.50 -p 2323 -t SECRET
 psxterm 192.168.1.50 -e "uname"         # run one command, exit with its status
+psxterm doctor 192.168.1.50             # remote diagnostics
+psxterm doctor --json 192.168.1.50      # machine-readable report
 ```
+
+`doctor` pings the daemon, then reports platform, filesystem, TTY, session and
+process-execution checks, running the controlled `cli_test` target through the
+real spawn backend. Exit codes: `0` ready, `1` ready with warnings, `2` not
+ready, `64` invalid client usage. See
+[docs/HARDWARE_BRINGUP.md](docs/HARDWARE_BRINGUP.md) for the full console
+bring-up sequence and failure triage.
 
 ### psh
 
@@ -143,12 +157,13 @@ expose the daemon to untrusted networks while authentication is disabled.
 
 ## Testing
 
-* 7 host unit suites via CTest (protocol, parser, env, registry, session,
-  tty, shell).
-* 20 host integration tests driving a real daemon with an independent Python
+* 8 host unit suites via CTest (protocol, parser, env, registry, session,
+  tty, shell, diagnostics).
+* 24 host integration tests driving a real daemon with an independent Python
   implementation of PTTY/1, covering malformed input, authentication, session
-  limits, resize, signals, multi-session isolation, timeouts and a
-  disconnect/fd-leak stress loop.
+  limits, resize, signals, multi-session isolation, timeouts, the doctor
+  command (human, JSON, busy session, client binary) and a disconnect/fd-leak
+  stress loop.
 * `cli_test` is the controlled external-execution target (argv, environment,
   `isatty`, window size, stdin, stdout/stderr, exit code 7).
 

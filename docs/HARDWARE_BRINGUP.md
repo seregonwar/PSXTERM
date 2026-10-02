@@ -1,0 +1,197 @@
+# Hardware bring-up guide (PS4 / PS5)
+
+PSXTerm is host tested, but **no PS4 or PS5 runtime path has been executed on a
+console yet**. Everything console-related is therefore marked
+`HARDWARE TEST REQUIRED` until it runs on real hardware. This guide describes
+the exact bring-up sequence, what each step proves, and what to collect when a
+step fails.
+
+Nothing in this document contains hardware results. If you run the sequence,
+record what you actually observed.
+
+## Status vocabulary
+
+| State | Meaning |
+|---|---|
+| IMPLEMENTED | Code exists and builds |
+| HOST TESTED | Executed successfully on the development host |
+| BUILDS FOR PS4 / PS5 | Cross-compiles against the payload SDK |
+| HARDWARE TEST REQUIRED | No console has executed it |
+| HARDWARE TESTED | Executed successfully on a physical console |
+
+Only promote to `HARDWARE TESTED` after the step actually succeeded on that
+console model. A PS5 success does not promote PS4, and vice versa.
+
+## 1. Prerequisites
+
+* A payload SDK installation:
+  * PS5: <https://github.com/ps5-payload-dev/sdk> (prebuilt release works)
+  * PS4: <https://github.com/ps4-payload-dev/sdk>
+* LLVM/clang 18 or newer with `lld` on `PATH` (the SDK wrappers locate
+  `llvm-config-18` … `llvm-config-15`).
+* An existing payload loader for your console (the SDK README lists known
+  working ones). PSXTerm does not require a new loader protocol; ship
+  `psxtermd` the same way you ship any other payload.
+* A PC on the same network running the `psxterm` client.
+
+## 2. Build
+
+Host (for the client and for reference behaviour):
+
+```console
+cmake -S . -B build-host -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-host -j
+ctest --test-dir build-host --output-on-failure
+```
+
+PS5 payloads:
+
+```console
+export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+cmake -S . -B build-ps5 -DCMAKE_TOOLCHAIN_FILE=$PS5_PAYLOAD_SDK/toolchain/prospero.cmake
+cmake --build build-ps5 -j
+```
+
+PS4 payloads:
+
+```console
+export PS4_PAYLOAD_SDK=/opt/ps4-payload-sdk
+cmake -S . -B build-ps4 -DCMAKE_TOOLCHAIN_FILE=$PS4_PAYLOAD_SDK/toolchain/orbis.cmake
+cmake --build build-ps4 -j
+```
+
+Expected artifacts in `build-ps5/` or `build-ps4/`:
+
+| Artifact | Purpose |
+|---|---|
+| `psxtermd` | the daemon payload (default port 2323) |
+| `psxterm-ttyprobe` | standalone TTY capability probe |
+| `cli_test.elf` | controlled external-execution target (exit code 7) |
+
+Target tools live under `/data/psxterm/bin` on the console. Copy
+`cli_test.elf` there before the process-execution checks can pass; the daemon
+looks for `cli_test` or `cli_test.elf` in `/data/psxterm/bin`, next to the
+running executable, and in the current directory.
+
+## 3. Deploy and start
+
+1. Deploy `psxtermd` with your existing loader.
+2. Start it with the defaults:
+
+   ```console
+   psxtermd                 # port 2323, authentication disabled (development)
+   psxtermd --token SECRET  # shared-token authentication
+   psxtermd --tty pipe      # force the PipeTTY fallback for comparison
+   ```
+
+3. Watch the daemon log (send it to the loader's console/serial output):
+
+   ```
+   psxterm: info: PSXTerm 0.1.0 (PS5) listening on 0.0.0.0:2323
+   psxterm: warn: authentication: DISABLED (insecure development mode) - ...
+   psxterm: info: tty: FreeBSDPTY backend available (pts 2)      <- or:
+   psxterm: warn: tty: real PTY not available, using PipeTTY fallback (reason)
+   ```
+
+   Whichever of those two lines appears is the first real hardware finding.
+
+## 4. Diagnostic sequence
+
+Run the steps in order; each one isolates a layer.
+
+### Step 1 - local TTY probe
+
+```console
+psxterm-ttyprobe
+```
+
+Exit status `0` means the FreeBSDPTY backend is usable, `1` means only the
+PipeTTY fallback is available. Record the structured output verbatim.
+
+### Step 2 - local diagnostics (no network)
+
+```console
+psxtermd --doctor          # human readable
+psxtermd --doctor --json   # machine readable
+```
+
+This runs platform, filesystem, TTY, session (skipped locally) and process
+checks. It exercises `cli_test` through the real spawn backend three times, so
+it answers "would a terminal session work on this console?" without a client.
+
+Exit status: `0` ready, `1` ready with warnings, `2` not ready.
+
+### Step 3 - connect from the PC
+
+```console
+psxterm 192.168.1.50            # interactive session
+psxterm 192.168.1.50 --token SECRET
+```
+
+Expected: `Connected to PlayStation 5` / `PSXTerm 0.1.0` followed by a
+`ps5:~ $` prompt.
+
+### Step 4 - remote diagnostics
+
+```console
+psxterm doctor 192.168.1.50               # human readable
+psxterm doctor --json 192.168.1.50 > doctor.json
+```
+
+The client first performs a PING/PONG roundtrip, then streams the report. The
+report contains a `Session` group (socket, TCP_NODELAY, frame counters) that
+the local mode cannot provide. Attach `doctor.json` to any issue report.
+
+### Step 5 - external execution
+
+```console
+psxterm 192.168.1.50
+ps5:~ $ /data/psxterm/bin/cli_test alpha "beta gamma"
+```
+
+Expected: argv, environment, `isatty` results, the stdin line read back, a
+message on stderr, and exit status `7` (reported as `[exit 7]`).
+
+## 5. Failure triage
+
+Keep bring-up surgical: fix the layer the report points at, not the whole
+stack.
+
+| Report says | Look at | Do not touch |
+|---|---|---|
+| `/dev/ptmx` FAIL | ptmx permissions/availability, loader sandbox | process loading |
+| `TIOCGPTN` FAIL | PTY availability on this firmware | ELF loading |
+| PTY PASS, `spawn` FAIL at `ATTACH` | ptrace attach flow | ELF relocation |
+| `spawn` FAIL at `LOAD_ELF` / `RELOCATE` | ELF mapping, relocations, mprotect | TTY handling |
+| `spawn` FAIL at `DUP_STDIO` | fd duplication (`pt_rdup`/`dup2`) | ELF loader |
+| spawn PASS, `stdout` PASS, `stdin` FAIL | stdio/TTY ownership and echo | protocol framing |
+| `SIGINT` FAIL | signal delivery to the foreground process | shell code |
+| everything PASS locally, remote FAIL | networking/auth | console runtime |
+
+The spawn stage names come from the backend itself
+(`PREPARE`, `CREATE_VICTIM`, `ATTACH`, `RAISE_PRIVILEGES`, `DUP_STDIO`,
+`LOAD_ELF`, `RELOCATE`, `SET_REGISTERS`, `DETACH`, `RUNNING`), so a failure
+tells you exactly where it stopped.
+
+## 6. What to collect on failure
+
+1. Console model and firmware, loader name/version.
+2. The `psxtermd -v` log from startup up to the failure.
+3. `psxterm-ttyprobe` output (local).
+4. `psxtermd --doctor` output, ideally `--json`.
+5. For remote failures: `psxterm doctor --json <host>` output and whether the
+   interactive session worked at all.
+6. Whether the console rebooted, hung, or kept running.
+
+## 7. Known limitations of the diagnostics
+
+* The daemon is single threaded: `doctor` runs synchronously and briefly
+  blocks other sessions (the process checks take a few hundred milliseconds).
+* Diagnostics refuse to run while a foreground process is active
+  (status `2` with an explanatory line) so they never disturb a running
+  program.
+* Console firmware is reported as `UNKNOWN`: there is no reliable payload-side
+  interface for it, and a guessed value would be worse than an honest UNKNOWN.
+* `stdio separation` is validated by running `cli_test` a second time with
+  stderr on its own descriptor; if the backend rejects distinct descriptors,
+  this check fails even though terminal sessions still work.
