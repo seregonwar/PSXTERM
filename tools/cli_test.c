@@ -5,6 +5,7 @@
  * line from stdin, writes to stdout and stderr, and exits with a known code.
  * Built for the host (integration tests) and for PS4/PS5 (payload ELF).
  */
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -119,9 +120,22 @@ main(int argc, char **argv)
 
     /*
      * Stdio acceptance matrix: every call shape a real CLI uses, each with a
-     * distinct marker so a missing one names the call that failed.
+     * distinct marker so a missing one names the call that failed. The raw
+     * write's result is recorded on the filesystem as well: when the session
+     * shows nothing after this point, that value says whether the descriptor
+     * itself refused the data inside the payload or whether the data left the
+     * process and was lost afterwards.
      */
-    (void)write(STDOUT_FILENO, "matrix: write stdout\n", 21);
+    {
+        ssize_t wrote = write(STDOUT_FILENO, "matrix: write stdout\n", 21);
+        int saved = errno;
+        char note[128];
+
+        snprintf(note, sizeof(note), "matrix: write(1)=%ld errno=%d",
+                 (long)wrote, wrote < 0 ? saved : 0);
+        marker(note);
+    }
+
     (void)write(STDERR_FILENO, "matrix: write stderr\n", 21);
 
     printf("matrix: printf stdout\n");
