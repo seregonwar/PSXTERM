@@ -1022,27 +1022,35 @@ raise_target_privileges_minimal(pid_t pid)
 static int
 install_stdio_fd(pid_t pid, pid_t owner, int fd, int target)
 {
+    int imported;
+
     if(fd < 0) {
         return -1;
+    }
+
+    /*
+     * Import first, dup2 second.
+     *
+     * Only the standard descriptors survive execve in the victim, so the
+     * daemon's numbers are not meaningful there any more: dup2 on such a
+     * number can "succeed" by duplicating whatever the victim happens to have
+     * at that index, which is how a payload ends up with a perfectly valid
+     * descriptor that leads nowhere. rdup imports the daemon's descriptor by
+     * number across the process boundary, which is unambiguous.
+     */
+    imported = (int)pt_rdup(pid, owner, fd);
+
+    if(imported >= 0) {
+        if(pt_dup2(pid, imported, target) == target) {
+            return 0;
+        }
     }
 
     if(pt_dup2(pid, fd, target) == target) {
         return 0;
     }
 
-    {
-        int fallback = (int)pt_rdup(pid, owner, fd);
-
-        if(fallback < 0) {
-            return -1;
-        }
-
-        if(pt_dup2(pid, fallback, target) != target) {
-            return -1;
-        }
-    }
-
-    return 0;
+    return -1;
 }
 
 /*

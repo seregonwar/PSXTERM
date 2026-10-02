@@ -748,13 +748,13 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
     options.envp = envp;
 
     /*
-     * NOTE (hardware): giving the process a pipe for stdin is the right shape
-     * for the end of input, but enabling it today costs the payload its
-     * stdout - even with the platform installing each stdio descriptor
-     * independently, the session then shows nothing but the payload's first
-     * raw line while the payload itself runs to completion (breadcrumbs in
-     * /data/psxterm/matrix.log). The stdin pipe plumbing below is kept for
-     * that work; the tty is used until it is understood.
+     * NOTE (hardware, both configurations measured): end of input must not be
+     * signalled on the pair that also carries the process's output - after
+     * that shutdown the daemon stops receiving the payload's output even
+     * though the payload's own write(1) still reports success. A stdin pipe
+     * is the right shape for that, but with it the payload's output does not
+     * reach the daemon either, and that is not understood yet. Until then the
+     * tty is used for all three, which is the configuration verified working.
      */
     (void)session->proc.stdin_fd;
     session->proc.stdin_fd = -1;
