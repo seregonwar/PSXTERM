@@ -721,8 +721,26 @@ load_elf(pid_t pid, const uint8_t *elf, size_t elf_size)
 
     {
         size_t relative = 0;
-        size_t abs64 = 0;
-        size_t other = 0;
+        size_t absolute = 0;
+        size_t glob_dat = 0;
+        size_t unresolved = 0;
+        const Elf64_Sym *dynsym = NULL;
+        size_t dynsym_count = 0;
+
+        /*
+         * A payload has no dynamic linker, so the loader is the one that has
+         * to resolve symbol-relative relocations. The symbol table the linker
+         * leaves in the file is what makes that possible: GLOB_DAT and 64
+         * entries carry a symbol index, and their value is the symbol's
+         * address in the loaded image.
+         */
+        for(int i = 0; i < ehdr->e_shnum; i++) {
+            if(shdr[i].sh_type == SHT_DYNSYM) {
+                dynsym = (const Elf64_Sym *)(elf + shdr[i].sh_offset);
+                dynsym_count = shdr[i].sh_size / sizeof(Elf64_Sym);
+                break;
+            }
+        }
 
         for(int i = 0; i < ehdr->e_shnum && !error; i++) {
             const Elf64_Rela *rela;
@@ -738,6 +756,7 @@ load_elf(pid_t pid, const uint8_t *elf, size_t elf_size)
             for(size_t j = 0; j < count; j++) {
                 intptr_t *loc;
                 uint32_t type = (uint32_t)(rela[j].r_info & 0xffffffffl);
+                size_t sym = (size_t)(rela[j].r_info >> 32);
 
                 switch(type) {
                 case R_X86_64_RELATIVE:
@@ -746,21 +765,29 @@ load_elf(pid_t pid, const uint8_t *elf, size_t elf_size)
                     relative++;
                     break;
 
-                case R_X86_64_64:
-                    /*
-                     * A payload is a position-independent executable and has no
-                     * dynamic linker to consult, so an absolute quad reference
-                     * is resolved against the load address. curl was the one
-                     * payload in the bundle carrying these, and ignoring them
-                     * is what left it hanging before its own main.
-                     */
+                case R_X86_64_GLOB_DAT:
                     loc = (intptr_t *)(mirror + rela[j].r_offset);
-                    *loc = base_addr + rela[j].r_addend;
-                    abs64++;
+                    if(dynsym && sym > 0 && sym < dynsym_count) {
+                        *loc = base_addr + (intptr_t)dynsym[sym].st_value;
+                        glob_dat++;
+                    } else {
+                        unresolved++;
+                    }
+                    break;
+
+                case R_X86_64_64:
+                    loc = (intptr_t *)(mirror + rela[j].r_offset);
+                    if(dynsym && sym > 0 && sym < dynsym_count) {
+                        *loc = base_addr + (intptr_t)dynsym[sym].st_value +
+                               rela[j].r_addend;
+                    } else {
+                        *loc = base_addr + rela[j].r_addend;
+                    }
+                    absolute++;
                     break;
 
                 default:
-                    other++;
+                    unresolved++;
                     break;
                 }
             }
@@ -768,8 +795,9 @@ load_elf(pid_t pid, const uint8_t *elf, size_t elf_size)
 
         /* Report what was applied: an unhandled type is the first thing to
          * suspect when a payload misbehaves here. */
-        PSX_LOGI("ps5: relocations: relative=%zu abs64=%zu other=%zu", relative,
-                 abs64, other);
+        PSX_LOGI("ps5: relocations: relative=%zu abs=%zu glob_dat=%zu "
+                 "unresolved=%zu (dynsym=%zu)",
+                 relative, absolute, glob_dat, unresolved, dynsym_count);
     }
 
     if(pt_copyin(pid, mirror, base_addr, base_size)) {
