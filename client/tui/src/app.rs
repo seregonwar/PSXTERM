@@ -2,7 +2,7 @@ use crate::i18n::{tr, trf};
 use crate::{
     config::{Config, Console},
     flash::{ACTIONS, filtered},
-    protocol::Command,
+    protocol::{Command, Connection},
     terminal::Pane,
 };
 use anyhow::Result;
@@ -64,6 +64,7 @@ pub struct App {
     pub demo: bool,
     pub hits: Vec<(Rect, Hit)>,
     pub text_scroll_limit: u16,
+    retiring: Vec<Connection>,
     next_pane: u64,
 }
 impl App {
@@ -85,6 +86,7 @@ impl App {
             demo,
             hits: vec![],
             text_scroll_limit: 0,
+            retiring: vec![],
             next_pane: 1,
         }
     }
@@ -132,7 +134,7 @@ impl App {
             .current_console()
             .cloned()
             .ok_or_else(|| anyhow::anyhow!(tr("error.no_console")))?;
-        if self.visible_ids().len() >= 8 || self.panes.len() >= 32 {
+        if self.visible_ids().len() >= 8 || self.panes.len() + self.retiring.len() >= 32 {
             anyhow::bail!(tr("error.panes_limit"));
         }
         let id = self.next_pane;
@@ -143,6 +145,7 @@ impl App {
         Ok(id)
     }
     pub fn poll(&mut self) {
+        self.retiring.retain(|c| !c.finished());
         let active = self.active;
         for p in &mut self.panes {
             p.poll(Some(p.id) == active);
@@ -156,6 +159,13 @@ impl App {
                 scroll: 0,
             };
         }
+    }
+    pub fn connections_finished(&self) -> bool {
+        self.retiring.iter().all(Connection::finished)
+            && self
+                .panes
+                .iter()
+                .all(|p| p.connection.as_ref().is_none_or(Connection::finished))
     }
     pub fn save(&mut self) -> Result<()> {
         if !self.demo {
@@ -208,7 +218,9 @@ impl App {
         if matches!(id, "rename" | "close" | "clear" | "banner") && self.active.is_none() {
             return Some(tr("error.open_first"));
         }
-        if (remote || id == "new") && (self.visible_ids().len() >= 8 || self.panes.len() >= 32) {
+        if (remote || id == "new")
+            && (self.visible_ids().len() >= 8 || self.panes.len() + self.retiring.len() >= 32)
+        {
             return Some(tr("error.panes_limit"));
         }
         None
@@ -358,8 +370,9 @@ impl App {
     }
     fn close_pane(&mut self, id: u64) {
         if let Some(i) = self.panes.iter().position(|p| p.id == id) {
-            if let Some(c) = &self.panes[i].connection {
+            if let Some(c) = self.panes[i].connection.take() {
                 c.close();
+                self.retiring.push(c);
             }
             self.panes.remove(i);
         }

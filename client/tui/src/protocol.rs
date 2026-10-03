@@ -200,30 +200,115 @@ pub fn connect(
     cols: u16,
     resume: Option<&Resume>,
 ) -> Result<(TcpStream, u32, String)> {
+    connect_inner(console, rows, cols, resume, None)?.context(tr("error.connect"))
+}
+
+fn cancelled(stop: Option<&AtomicU8>) -> bool {
+    stop.is_some_and(|s| s.load(Ordering::Acquire) != 0)
+}
+
+fn finish_cancelled_open(stream: &mut TcpStream, sid: u32, stop: Option<&AtomicU8>) {
+    let kind = if stop.is_some_and(|s| s.load(Ordering::Acquire) == 1) {
+        DETACH
+    } else {
+        CLOSE
+    };
+    // PTTY/1 accepts session id 0 on the current socket. The OPEN/ATTACH
+    // request and this control frame are ordered even before OPEN_OK arrives.
+    let _ = send_frame(stream, kind, sid, vec![]);
+}
+
+fn read_handshake_bytes(
+    stream: &mut TcpStream,
+    bytes: &mut [u8],
+    deadline: Instant,
+    stop: Option<&AtomicU8>,
+) -> Result<bool> {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if cancelled(stop) {
+            return Ok(false);
+        }
+        if Instant::now() >= deadline {
+            bail!(tr("error.timeout"));
+        }
+        match stream.read(&mut bytes[offset..]) {
+            Ok(0) => bail!(tr("error.partial")),
+            Ok(n) => offset += n,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(true)
+}
+
+fn read_handshake_frame(stream: &mut TcpStream, stop: Option<&AtomicU8>) -> Result<Option<Frame>> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut header = [0; 16];
+    if !read_handshake_bytes(stream, &mut header, deadline, stop)? {
+        return Ok(None);
+    }
+    let mut decoder = Decoder::default();
+    decoder.feed(&header)?;
+    if let Some(frame) = decoder.next_frame()? {
+        return Ok(Some(frame));
+    }
+    let mut payload = vec![0; u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize];
+    if !read_handshake_bytes(stream, &mut payload, deadline, stop)? {
+        return Ok(None);
+    }
+    decoder.feed(&payload)?;
+    Ok(Some(decoder.next_frame()?.context(tr("error.partial"))?))
+}
+
+fn connect_inner(
+    console: &Console,
+    rows: u16,
+    cols: u16,
+    resume: Option<&Resume>,
+    stop: Option<&AtomicU8>,
+) -> Result<Option<(TcpStream, u32, String)>> {
+    if cancelled(stop) {
+        return Ok(None);
+    }
     console.validate()?;
+    let token = console.credential()?;
     let addresses: Vec<_> = (console.host.as_str(), console.port)
         .to_socket_addrs()
         .context(tr("error.resolve"))?
         .collect();
     let mut stream = None;
     for address in addresses.into_iter().take(4) {
+        if cancelled(stop) {
+            return Ok(None);
+        }
         if let Ok(s) = TcpStream::connect_timeout(&address, Duration::from_secs(3)) {
             stream = Some(s);
             break;
         }
     }
+    if cancelled(stop) {
+        return Ok(None);
+    }
     let mut stream = stream.context(tr("error.connect"))?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_read_timeout(Some(Duration::from_millis(25)))?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
     stream.set_nodelay(true)?;
     let name = b"psxterm-tui";
-    let token = console.credential()?;
     let mut hello = vec![name.len() as u8];
     hello.extend_from_slice(name);
     hello.push(token.len() as u8);
     hello.extend_from_slice(token.as_bytes());
     send_frame(&mut stream, HELLO, 0, hello)?;
-    let ack = read_frame(&mut stream)?;
+    let Some(ack) = read_handshake_frame(&mut stream, stop)? else {
+        return Ok(None);
+    };
     if ack.kind != HELLO_ACK || ack.payload.is_empty() {
         bail!(tr("error.hello"));
     }
@@ -238,6 +323,9 @@ pub fn connect(
         .filter(|c| !c.is_control())
         .take(120)
         .collect();
+    if cancelled(stop) {
+        return Ok(None);
+    }
     if let Some(r) = resume {
         let mut payload = r.sid.to_le_bytes().to_vec();
         payload.extend_from_slice(&r.token);
@@ -247,14 +335,31 @@ pub fn connect(
         payload.extend_from_slice(b"xterm-256color");
         send_frame(&mut stream, OPEN, 0, payload)?;
     }
-    let open = read_frame(&mut stream)?;
+    let open = match read_handshake_frame(&mut stream, stop) {
+        Ok(Some(open)) => open,
+        Ok(None) => {
+            finish_cancelled_open(&mut stream, 0, stop);
+            return Ok(None);
+        }
+        Err(e) => {
+            // A failed reply can still follow a successfully created session.
+            let _ = send_frame(&mut stream, CLOSE, 0, vec![]);
+            return Err(e);
+        }
+    };
     if open.kind == ATTACH_FAIL {
         bail!(tr("error.attach"));
     }
     if open.kind != if resume.is_some() { ATTACH_OK } else { OPEN_OK } || open.sid == 0 {
+        let _ = send_frame(&mut stream, CLOSE, 0, vec![]);
         bail!(tr("error.open"));
     }
-    Ok((stream, open.sid, server))
+    if cancelled(stop) {
+        finish_cancelled_open(&mut stream, open.sid, stop);
+        return Ok(None);
+    }
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    Ok(Some((stream, open.sid, server)))
 }
 pub fn dimensions(rows: u16, cols: u16) -> Vec<u8> {
     [rows.max(1).to_le_bytes(), cols.max(1).to_le_bytes()].concat()
@@ -268,7 +373,11 @@ fn worker(
     events: &SyncSender<Event>,
     stop: &AtomicU8,
 ) -> Result<()> {
-    let (mut stream, sid, server) = connect(&console, rows, cols, resume.as_ref())?;
+    let Some((mut stream, sid, server)) =
+        connect_inner(&console, rows, cols, resume.as_ref(), Some(stop))?
+    else {
+        return Ok(());
+    };
     emit(events, stop, Event::Connected(sid, server));
     stream.set_read_timeout(Some(Duration::from_millis(25)))?;
     let mut decoder = Decoder::default();

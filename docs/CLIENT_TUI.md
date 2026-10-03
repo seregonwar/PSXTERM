@@ -87,6 +87,13 @@ reported instead of silently creating another session. Resume tokens are not
 saved. Normal quit and explicit close send CLOSE; abnormal connection loss may
 leave a suspended session until the daemon's retention timeout expires.
 
+Closing a tab also cancels an in-flight connection. Before OPEN/ATTACH it stops
+without creating a shell; after sending OPEN/ATTACH it sends the appropriate
+control frame even if the reply is incomplete. Closed tabs disappear immediately,
+but their workers remain tracked until shutdown completes. The global limit of
+32 includes connections still closing. Handshake replies have a five-second total
+deadline and are read incrementally so cancellation does not wait for that timeout.
+
 ## Flash commands
 
 Flash commands offer a short path to common read-only shell actions. In the UI
@@ -182,3 +189,7 @@ PowerShell equivalent: set `$env:PSXTERM_TEST_PORT='29323'` before the Cargo com
 Local Windows-to-WSL validation covered multiple independent sessions, output,
 resize, ping and detach/resume with the same server session ID. **This is host
 validation, not PS4/PS5 hardware validation.**
+Cancellation tests cover fragmented HELLO/OPEN/ATTACH replies, close and detach,
+and waiting for connections belonging to removed tabs. The real-daemon test also
+withholds OPEN_OK after creating a session, cancels the client and verifies the
+closed session cannot be resumed.

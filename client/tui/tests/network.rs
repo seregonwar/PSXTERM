@@ -5,11 +5,162 @@ use psxterm_tui::{
     protocol::*,
 };
 use std::{
-    net::TcpListener,
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
     path::PathBuf,
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
+
+fn finish(connection: &Connection) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !connection.finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        connection.finished(),
+        "cancelled connection did not finish promptly"
+    );
+}
+
+#[test]
+fn cancellation_during_fragmented_hello_never_opens_a_terminal() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (ready, receive) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        assert_eq!(read_frame(&mut stream).unwrap().kind, HELLO);
+        let ack = Frame {
+            kind: HELLO_ACK,
+            sid: 0,
+            payload: b"\0HOST".to_vec(),
+        }
+        .encode()
+        .unwrap();
+        stream.write_all(&ack[..8]).unwrap();
+        ready.send(()).unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            stream.read(&mut byte).unwrap(),
+            0,
+            "OPEN was sent after cancellation"
+        );
+    });
+    let connection = Connection::start(console(port), 24, 80, None);
+    receive.recv_timeout(Duration::from_secs(3)).unwrap();
+    connection.close();
+    finish(&connection);
+    assert!(
+        !connection
+            .rx
+            .try_iter()
+            .any(|e| matches!(e, Event::Connected(..)))
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn cancelled_open_and_attach_send_control_without_waiting_for_reply() {
+    for resume in [
+        None,
+        Some(Resume {
+            sid: 71,
+            token: [9; 16],
+        }),
+    ] {
+        for detach in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (ready, receive) = mpsc::channel();
+            let attaching = resume.is_some();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                assert_eq!(read_frame(&mut stream).unwrap().kind, HELLO);
+                send_frame(&mut stream, HELLO_ACK, 0, b"\0HOST".to_vec()).unwrap();
+                assert_eq!(
+                    read_frame(&mut stream).unwrap().kind,
+                    if attaching { ATTACH } else { OPEN }
+                );
+                let reply = Frame {
+                    kind: if attaching { ATTACH_OK } else { OPEN_OK },
+                    sid: 71,
+                    payload: vec![],
+                }
+                .encode()
+                .unwrap();
+                stream.write_all(&reply[..9]).unwrap();
+                ready.send(()).unwrap();
+                let control = read_frame(&mut stream).unwrap();
+                assert_eq!(control.kind, if detach { DETACH } else { CLOSE });
+                assert_eq!(control.sid, 0);
+            });
+            let connection = Connection::start(console(port), 24, 80, resume.clone());
+            receive.recv_timeout(Duration::from_secs(3)).unwrap();
+            if detach {
+                drop(connection);
+            } else {
+                connection.close();
+                finish(&connection);
+            }
+            server.join().unwrap();
+        }
+    }
+}
+
+#[test]
+fn closed_tab_finishes_its_connection_even_after_all_tabs_are_removed() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (ready, receive) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        assert_eq!(read_frame(&mut stream).unwrap().kind, HELLO);
+        send_frame(&mut stream, HELLO_ACK, 0, b"\0HOST".to_vec()).unwrap();
+        assert_eq!(read_frame(&mut stream).unwrap().kind, OPEN);
+        ready.send(()).unwrap();
+        assert_eq!(read_frame(&mut stream).unwrap().kind, CLOSE);
+    });
+    let mut app = App::new(
+        Config {
+            version: 1,
+            language: Language::En,
+            consoles: vec![console(port)],
+        },
+        PathBuf::new(),
+        false,
+    );
+    app.new_pane().unwrap();
+    receive.recv_timeout(Duration::from_secs(3)).unwrap();
+    app.action("close");
+    app.handle(crossterm::event::Event::Key(
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    ));
+    assert!(app.panes.is_empty());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !app.connections_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(app.connections_finished());
+    server.join().unwrap();
+    assert!(
+        Instant::now() < deadline,
+        "shutdown waited for the old handshake timeout"
+    );
+}
 
 fn console(port: u16) -> Console {
     Console {
@@ -113,6 +264,68 @@ fn worker_handshake_binary_streams_eof_resize_ping_and_close() {
     assert!(output.contains(&255));
     c.close();
     server.join().unwrap();
+}
+
+#[test]
+#[ignore = "requires PSXTERM_TEST_PORT pointing to the running host daemon"]
+fn actual_host_cancelled_open_does_not_leave_a_resumable_session() {
+    let host_port: u16 = std::env::var("PSXTERM_TEST_PORT")
+        .expect("set PSXTERM_TEST_PORT")
+        .parse()
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_port = listener.local_addr().unwrap().port();
+    let (ready, receive) = mpsc::channel();
+    let proxy = thread::spawn(move || {
+        let (mut client, _) = listener.accept().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        assert_eq!(read_frame(&mut client).unwrap().kind, HELLO);
+        send_frame(&mut client, HELLO_ACK, 0, b"\0HOST".to_vec()).unwrap();
+        assert_eq!(read_frame(&mut client).unwrap().kind, OPEN);
+        let (mut backend, sid, _) = connect(&console(host_port), 24, 80, None).unwrap();
+        let info = read_frame(&mut backend).unwrap();
+        assert_eq!(info.kind, SESSION_INFO);
+        let resume = Resume {
+            sid,
+            token: info.payload[4..].try_into().unwrap(),
+        };
+        // Deliberately withhold OPEN_OK from the client after the real daemon
+        // has created the session, exercising cancellation at the critical point.
+        ready.send(()).unwrap();
+        let close = read_frame(&mut client).unwrap();
+        assert_eq!(close.kind, CLOSE);
+        assert_eq!(close.sid, 0);
+        backend.write_all(&close.encode().unwrap()).unwrap();
+        wait_for_eof(&mut backend);
+        resume
+    });
+    let connection = Connection::start(console(proxy_port), 24, 80, None);
+    receive.recv_timeout(Duration::from_secs(3)).unwrap();
+    connection.close();
+    finish(&connection);
+    let old_session = proxy.join().unwrap();
+    let result = connect(&console(host_port), 24, 80, Some(&old_session));
+    assert_eq!(
+        result
+            .expect_err("closed session was still resumable")
+            .to_string(),
+        psxterm_tui::i18n::tr("error.attach")
+    );
+}
+
+fn wait_for_eof(stream: &mut TcpStream) {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut byte = [0; 4096];
+    loop {
+        match stream.read(&mut byte).unwrap() {
+            0 => break,
+            _ => continue,
+        }
+    }
 }
 
 #[test]

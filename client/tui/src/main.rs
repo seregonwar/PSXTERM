@@ -208,12 +208,7 @@ fn run() -> Result<()> {
     // Keep workers alive long enough to deliver explicit CLOSE on normal quit.
     if app.quit {
         let deadline = Instant::now() + Duration::from_secs(4);
-        while Instant::now() < deadline
-            && app
-                .panes
-                .iter()
-                .any(|p| p.connection.as_ref().is_some_and(|c| !c.finished()))
-        {
+        while Instant::now() < deadline && !app.connections_finished() {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
