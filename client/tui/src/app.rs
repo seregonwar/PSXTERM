@@ -1,5 +1,6 @@
 use crate::i18n::{tr, trf};
 use crate::{
+    clipboard,
     config::{Config, Console},
     flash::{ACTIONS, filtered},
     protocol::{Command, Connection},
@@ -7,8 +8,34 @@ use crate::{
 };
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
-use ratatui::layout::Rect;
+use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use std::{collections::HashMap, path::PathBuf};
+
+/// A screen-space text selection, in (column, row) cells.
+#[derive(Clone, Copy)]
+pub struct Selection {
+    pub start: (u16, u16),
+    pub end: (u16, u16),
+}
+
+impl Selection {
+    /// Inclusive bounds, normalised so the first pair is the top-left one.
+    pub fn bounds(&self) -> ((u16, u16), (u16, u16)) {
+        let (mut x0, mut y0) = self.start;
+        let (mut x1, mut y1) = self.end;
+
+        if (y0, x0) > (y1, x1) {
+            std::mem::swap(&mut x0, &mut x1);
+            std::mem::swap(&mut y0, &mut y1);
+        }
+
+        ((x0, y0), (x1, y1))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+}
 
 pub enum Overlay {
     None,
@@ -64,6 +91,9 @@ pub struct App {
     pub demo: bool,
     pub hits: Vec<(Rect, Hit)>,
     pub text_scroll_limit: u16,
+    /// Screen-space text selection and the size it was made on.
+    pub sel: Option<Selection>,
+    pub screen: (u16, u16),
     retiring: Vec<Connection>,
     next_pane: u64,
 }
@@ -86,9 +116,76 @@ impl App {
             demo,
             hits: vec![],
             text_scroll_limit: 0,
+            sel: None,
+            screen: (0, 0),
             retiring: vec![],
             next_pane: 1,
         }
+    }
+
+    /// Copy the current selection, or the whole visible workspace when there
+    /// is none, into the clipboard of the terminal displaying this client.
+    pub fn copy_selection(&mut self) {
+        let sel = match self.sel {
+            Some(sel) if !sel.is_empty() => sel,
+            _ => {
+                let (cols, rows) = self.screen;
+                if cols == 0 || rows == 0 {
+                    return;
+                }
+                Selection {
+                    start: (0, 0),
+                    end: (cols.saturating_sub(1), rows.saturating_sub(1)),
+                }
+            }
+        };
+
+        match self.selection_text(sel) {
+            Some(text) if !text.trim().is_empty() => match clipboard::copy(&text) {
+                Ok(count) => self.notice = trf("notice.copied", &[count.to_string()]),
+                Err(e) => self.notice = e.to_string(),
+            },
+            Some(_) => self.notice = tr("notice.copy_empty").into(),
+            None => self.notice = tr("ui.tiny").into(),
+        }
+
+        self.sel = None;
+    }
+
+    /// The text under the selection, exactly as it is displayed.
+    ///
+    /// The workspace is rendered into an off-screen buffer first, so wrapped
+    /// lines and wide glyphs come out the way the user sees them instead of
+    /// the way the raw stream looked.
+    fn selection_text(&mut self, sel: Selection) -> Option<String> {
+        let (cols, rows) = self.screen;
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).ok()?;
+        terminal.draw(|f| crate::ui::draw(f, self)).ok()?;
+
+        let ((x0, y0), (x1, y1)) = sel.bounds();
+        let mut out = String::new();
+        let y1 = y1.min(rows.saturating_sub(1));
+
+        for y in y0..=y1 {
+            let start = if y == y0 { x0 } else { 0 };
+            let end = if y == y1 {
+                x1
+            } else {
+                cols.saturating_sub(1)
+            };
+            let mut line = String::new();
+
+            for x in start..=end.min(cols.saturating_sub(1)) {
+                line.push_str(terminal.backend().buffer()[(x, y)].symbol());
+            }
+
+            out.push_str(line.trim_end());
+            if y != y1 {
+                out.push('\n');
+            }
+        }
+
+        Some(out)
     }
     pub fn current_console(&self) -> Option<&Console> {
         self.config
@@ -440,6 +537,19 @@ impl App {
             }
             Event::Mouse(m) => match m.kind {
                 MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                    /*
+                     * A press also starts a text selection, so dragging over
+                     * the workspace copies what the user sees. Clicking a pane
+                     * still switches to it: a press without a drag leaves no
+                     * selection and is handled as the click it is.
+                     */
+                    if matches!(self.overlay, Overlay::None) {
+                        self.sel = Some(Selection {
+                            start: (m.column, m.row),
+                            end: (m.column, m.row),
+                        });
+                    }
+
                     let hit = self
                         .hits
                         .iter()
@@ -490,6 +600,18 @@ impl App {
                             _ => {}
                         },
                         _ => {}
+                    }
+                }
+                MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                    if let Some(sel) = &mut self.sel {
+                        sel.end = (m.column, m.row);
+                    }
+                }
+                MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                    if self.sel.is_some_and(|sel| !sel.is_empty()) {
+                        self.copy_selection();
+                    } else {
+                        self.sel = None;
                     }
                 }
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
@@ -543,6 +665,21 @@ impl App {
         }
     }
     fn key(&mut self, k: KeyEvent) {
+        /*
+         * Copying is reachable from the keyboard as well as from the mouse:
+         * Ctrl+Shift+C hands the selection - or the whole visible workspace -
+         * to the terminal's clipboard. Ctrl+C itself stays untouched, because
+         * that belongs to the session on the other side.
+         */
+        if k.modifiers.contains(KeyModifiers::CONTROL)
+            && k.modifiers.contains(KeyModifiers::SHIFT)
+            && k.code == KeyCode::Char('c')
+            && matches!(self.overlay, Overlay::None)
+        {
+            self.copy_selection();
+            return;
+        }
+
         if !matches!(self.overlay, Overlay::None) {
             self.overlay_key(k);
             return;

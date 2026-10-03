@@ -1,4 +1,5 @@
 pub mod app;
+pub mod clipboard;
 pub mod config;
 pub mod flash;
 pub mod i18n;

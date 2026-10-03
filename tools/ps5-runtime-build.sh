@@ -117,13 +117,18 @@ build_zlib() {
     rm -rf "$WORK/zlib-$ver"
     tar -xf "$tarball" -C "$WORK" || die "zlib unpack failed"
 
+    # zlib's own configure mis-detects a cross environment (it ends up
+    # without vsnprintf and errno), so its CMake build is used instead: the
+    # SDK ships a CMake toolchain file that our own cross builds already use
+    # successfully.
     (
         cd "$WORK/zlib-$ver" || die "zlib dir missing"
-        # shellcheck disable=SC1090
-        source "$PS5_PAYLOAD_SDK/toolchain/prospero.sh"
-        ./configure --prefix="$BUNDLE" >/dev/null || exit 1
-        make -j"$JOBS" >/dev/null || exit 1
-        make install >/dev/null || exit 1
+        cmake -S . -B build \
+            -DCMAKE_TOOLCHAIN_FILE="$PS5_PAYLOAD_SDK/toolchain/prospero.cmake" \
+            -DCMAKE_INSTALL_PREFIX="$BUNDLE" \
+            -DZLIB_BUILD_EXAMPLES=OFF >/dev/null || exit 1
+        cmake --build build -j"$JOBS" >/dev/null || exit 1
+        cmake --install build >/dev/null || exit 1
     ) || die "zlib build failed"
 }
 

@@ -88,6 +88,7 @@ fn fit_tail(text: &str, width: u16) -> String {
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     app.hits.clear();
+    app.screen = (area.width, area.height);
     f.render_widget(Block::default().style(Style::default().bg(BG).fg(FG)), area);
     if area.width < 55 || area.height < 18 {
         f.render_widget(
@@ -147,7 +148,35 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         app.hits.clear();
         sidebar(f, app, drawer);
     }
+    highlight_selection(f, app);
     overlay(f, app);
+}
+
+/// Paint the current text selection in reverse video.
+///
+/// Drawn after the workspace and before any overlay, so the selection is
+/// visible over the content it covers but never over a dialog.
+fn highlight_selection(f: &mut Frame, app: &App) {
+    let Some(sel) = app.sel else {
+        return;
+    };
+
+    let area = f.area();
+    let ((x0, y0), (x1, y1)) = sel.bounds();
+    let y1 = y1.min(area.height.saturating_sub(1));
+    let buffer = f.buffer_mut();
+
+    for y in y0..=y1 {
+        let end = if y == y1 {
+            x1
+        } else {
+            area.width.saturating_sub(1)
+        };
+
+        for x in x0..=end.min(area.width.saturating_sub(1)) {
+            buffer[(x, y)].modifier |= Modifier::REVERSED;
+        }
+    }
 }
 
 fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {

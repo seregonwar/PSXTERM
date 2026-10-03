@@ -30,6 +30,8 @@
   "pane.title": "Terminal {0}",
   "pane.none": "No terminals open",
   "hint.start": "F3 add a console · F4 open a terminal",
+  "notice.copied": "copied {0} characters to the clipboard",
+  "notice.copy_empty": "nothing to copy here",
   "hint.saved": "Console saved · F4 open a terminal",
   "hint.flash": "Flash {0} · dedicated terminal",
   "hint.paste_overlay": "Close the dialog before pasting into a terminal",
