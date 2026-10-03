@@ -45,6 +45,7 @@ psx_session_create(uint32_t id, int sock_fd)
     session->proc.relay_in = -1;
     session->proc.loader = false;
     session->proc.exit_code_hint = 0;
+    session->proc.exit_reported = false;
     session->proc.stderr_fd = -1;
     session->state = PSX_SESSION_ACCEPTED;
     session->rows = 24;
@@ -802,6 +803,7 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
             session->proc.relay_out = fd;
             session->proc.relay_in = fd;
             session->proc.exit_code_hint = 0;
+            session->proc.exit_reported = false;
             session->proc.running = true;
             session->proc.status = 0;
             session->proc.started_ms = psx_now_ms();
@@ -974,7 +976,13 @@ psx_session_check_process(psx_session_t *session)
      * that connection as the wrapper's last line.
      */
     if(session->proc.loader) {
-        if(session->proc.relay_out >= 0) {
+        /*
+         * The run is over when the wrapper said so, or when the connection
+         * reached its end: waiting only for the end of file left the shell
+         * hanging whenever the command kept the socket open, which the user
+         * had to interrupt by hand.
+         */
+        if(session->proc.relay_out >= 0 && !session->proc.exit_reported) {
             return false;
         }
 
@@ -984,6 +992,7 @@ psx_session_check_process(psx_session_t *session)
 
         session->proc.running = false;
         session->proc.loader = false;
+        session->proc.exit_reported = false;
         session->proc.status = session->proc.exit_code_hint;
         snprintf(session->command, sizeof(session->command), "%s", "psh");
 
@@ -2077,6 +2086,7 @@ session_scan_exit_marker(psx_session_t *session, const uint8_t *data,
 
             if(k > 0) {
                 session->proc.exit_code_hint = atoi(digits);
+                session->proc.exit_reported = true;
                 head = i;
             }
         }

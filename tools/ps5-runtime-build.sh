@@ -231,6 +231,10 @@ build_curl() {
         # returns there), and curl was the only thing in this bundle linking
         # it. The public suffix list only affects cookie handling, which a
         # download does not need.
+        #
+        # The CA bundle path is the one the runtime layout installs, not the
+        # build directory: a baked-in host path made every request fail with
+        # "Problem with the SSL CA cert" on the console.
         PKG_CONFIG_PATH="$BUNDLE/lib/pkgconfig" \
         CPPFLAGS="-I$BUNDLE/include" \
         LDFLAGS="-L$BUNDLE/lib" \
@@ -238,7 +242,7 @@ build_curl() {
             --enable-static --disable-shared \
             --with-openssl \
             --without-libpsl \
-            --with-ca-bundle="$BUNDLE/etc/ca-bundle.crt" \
+            --with-ca-bundle=/data/psxterm/runtime/etc/ca-bundle.crt \
             --disable-docs >/dev/null || exit 1
 
         make -j"$JOBS" >/dev/null || exit 1

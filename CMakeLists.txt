@@ -152,6 +152,18 @@ if(NOT PSXTERM_PLATFORM STREQUAL "host")
       "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libcrypto.a"
       "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libz.a")
     set_target_properties(psxterm-fetch PROPERTIES SUFFIX ".elf")
+
+    # curlprobe: is libcurl itself usable in a payload? It splits curl's
+    # failure between the library and the CLI around it.
+    add_executable(curlprobe tools/curlprobe.c)
+    target_include_directories(curlprobe PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/include")
+    target_link_libraries(curlprobe PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libcurl.a"
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libssl.a"
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libcrypto.a"
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libz.a")
+    set_target_properties(curlprobe PROPERTIES SUFFIX ".elf")
   endif()
 
   # pslist: PS5 bring-up helper that lists processes through sysctl.

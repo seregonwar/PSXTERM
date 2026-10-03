@@ -54,6 +54,10 @@ typedef struct {
      */
     bool loader;
     int exit_code_hint;
+
+    /* The wrapper has already reported the status: the run is over even if the
+     * connection has not reached its end of file yet. */
+    bool exit_reported;
 } psx_process_t;
 
 typedef struct {

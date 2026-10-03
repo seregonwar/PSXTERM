@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -153,6 +154,17 @@ main(void)
 
     printf("PSXTERM-EXIT %d\n", status);
     fflush(stdout);
+
+    /*
+     * End the connection explicitly.
+     *
+     * The command may still hold this socket open (a child that ignores the
+     * kill, for instance), and the daemon only learns the run is over from the
+     * end of file on it - without this the session waits forever and the user
+     * has to interrupt the shell.
+     */
+    shutdown(STDOUT_FILENO, SHUT_WR);
+    close(STDOUT_FILENO);
 
     return 0;
 }
