@@ -36,6 +36,15 @@ typedef struct {
     /* Session-owned read end of a separately captured stderr stream, or -1
      * when the backend writes both output streams to the terminal. */
     int stderr_fd;
+
+    /*
+     * Relay for the payload runtime's own stdio handles: relay_out is the
+     * daemon's read end (the payload's libc stdout arrives there) and relay_in
+     * its write end (input for the payload's runtime). Both -1 when the
+     * backend is not relaying.
+     */
+    int relay_out;
+    int relay_in;
 } psx_process_t;
 
 typedef struct {
@@ -49,6 +58,19 @@ typedef struct {
     int stderr_fd;
 
     const char *cwd;
+
+    /*
+     * Optional relay for the payload runtime's own stdio handles.
+     *
+     * A console payload writes its libc stdout through the handles the loader
+     * passes it, not through fd 1, so a loader that wants to see it has to own
+     * the other end of that channel. When both pointers are given, the backend
+     * builds the channel out of a real pipe it owns, hands the payload its
+     * ends, and writes the daemon's ends here (-1 when no relay was set up).
+     * Both pointers must be NULL when no relay is wanted.
+     */
+    int *relay_out;
+    int *relay_in;
 } psx_spawn_options_t;
 
 /*

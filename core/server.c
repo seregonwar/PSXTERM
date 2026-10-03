@@ -563,8 +563,8 @@ server_loop(psx_server_t *server)
         n++;
 
         for(psx_session_t *s = server->sessions.sessions; s; s = s->next) {
-            /* Three entries per session at most: socket, tty, stderr. */
-            if(s->state == PSX_SESSION_CLOSED || n + 3 > server->pfds_cap) {
+            /* Four entries per session at most: socket, tty, stderr, relay. */
+            if(s->state == PSX_SESSION_CLOSED || n + 4 > server->pfds_cap) {
                 continue;
             }
 
@@ -602,6 +602,15 @@ server_loop(psx_server_t *server)
                (s->state == PSX_SESSION_RUNNING ||
                 s->state == PSX_SESSION_DETACHED)) {
                 server->pfds[n].fd = s->proc.stderr_fd;
+                server->pfds[n].events = POLLIN;
+                server->owners[n] = s->id;
+                n++;
+            }
+
+            if(s->proc.relay_out >= 0 &&
+               (s->state == PSX_SESSION_RUNNING ||
+                s->state == PSX_SESSION_DETACHED)) {
+                server->pfds[n].fd = s->proc.relay_out;
                 server->pfds[n].events = POLLIN;
                 server->owners[n] = s->id;
                 n++;
@@ -676,6 +685,16 @@ server_loop(psx_server_t *server)
                     if(revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) {
                         if(psx_session_on_stderr_readable(session) < 0) {
                             server_handle_error(server, session, "stderr error");
+                        }
+                    }
+                    continue;
+                }
+
+                if(session->proc.relay_out >= 0 &&
+                   server->pfds[i].fd == session->proc.relay_out) {
+                    if(revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) {
+                        if(psx_session_on_relay_readable(session) < 0) {
+                            server_handle_error(server, session, "relay error");
                         }
                     }
                     continue;

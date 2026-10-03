@@ -781,7 +781,7 @@ load_elf(pid_t pid, const uint8_t *elf, size_t elf_size)
  * the argument construction used by the reference ELF loader.
  */
 static intptr_t
-build_payload_args(pid_t pid)
+build_payload_args(pid_t pid, const psx_spawn_options_t *options)
 {
     intptr_t buf;
     int master_sock;
@@ -848,17 +848,42 @@ build_payload_args(pid_t pid)
 
     /*
      * SAFETY RULE, learned the hard way (two kernel panics on hardware):
-     * rwpipe and kpipe_addr MUST describe a real pipe created inside the
-     * victim. Handing the payload runtime any other descriptor - a session
-     * socket, for instance - makes it treat that kernel file object as a pipe
-     * and corrupt kernel memory.
-     *
-     * The runtime reads its input from rwpipe[0] while starting, so the pipe
-     * must exist and stay empty until the loader relays something into it.
-     * Relaying through the daemon's own end of this pipe is the next step;
-     * until then the private pipe is the only safe configuration.
+     * rwpipe and kpipe_addr MUST describe a real pipe. Handing the payload
+     * runtime any other descriptor - a session socket, for instance - makes it
+     * treat that kernel file object as a pipe and corrupt kernel memory. Both
+     * shapes below are real pipes: one owned by the daemon when a relay is
+     * wanted, otherwise one created inside the victim.
      */
-    {
+    if(options->relay_out && options->relay_in) {
+        /*
+         * The daemon owns the pipe and imports both ends, so it can read what
+         * the payload's runtime writes and feed what it reads. Importing a
+         * pipe's descriptors keeps them pipes, which is what the safety rule
+         * requires.
+         */
+        int daemon_pipe[2] = {-1, -1};
+
+        if(pipe(daemon_pipe) != 0) {
+            PSX_LOGE("ps5: args: cannot create the relay pipe");
+            return 0;
+        }
+
+        pipe_fds[0] = (int)pt_rdup(pid, getpid(), daemon_pipe[0]);
+        pipe_fds[1] = (int)pt_rdup(pid, getpid(), daemon_pipe[1]);
+
+        if(pipe_fds[0] < 0 || pipe_fds[1] < 0) {
+            PSX_LOGE("ps5: args: cannot import the relay pipe");
+            close(daemon_pipe[0]);
+            close(daemon_pipe[1]);
+            return 0;
+        }
+
+        *options->relay_out = daemon_pipe[0];
+        *options->relay_in = daemon_pipe[1];
+
+        PSX_LOGI("ps5: args: relay pipe %d,%d -> victim %d,%d", daemon_pipe[0],
+                 daemon_pipe[1], pipe_fds[0], pipe_fds[1]);
+    } else {
         intptr_t victim_fds = buf + 0x400;
 
         if(pt_call(pid, pt_resolve(pid, NID_PIPE), (uint64_t)victim_fds) != 0) {
@@ -1511,7 +1536,7 @@ psx_platform_spawn(const psx_spawn_options_t *options,
         const char *args_opt = getenv("PSXTERM_PS5_PAYLOAD_ARGS");
         bool want_args = args_opt == NULL || args_opt[0] != '0';
 
-        if(want_args && (args = build_payload_args(pid))) {
+        if(want_args && (args = build_payload_args(pid, options))) {
             PSX_LOGI("ps5: payload args: reference ABI at 0x%lx",
                      (unsigned long)args);
         } else {

@@ -41,6 +41,8 @@ psx_session_create(uint32_t id, int sock_fd)
     session->sock_fd = sock_fd;
     session->file_fd = -1;
     session->proc.stdin_fd = -1;
+    session->proc.relay_out = -1;
+    session->proc.relay_in = -1;
     session->proc.stderr_fd = -1;
     session->state = PSX_SESSION_ACCEPTED;
     session->rows = 24;
@@ -756,6 +758,24 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
     options.argv = argv;
     options.envp = envp;
 
+    /*
+     * Relay, off by default.
+     *
+     * The daemon-owned pipe is built and imported correctly (the log shows
+     * "relay pipe 34,35 -> victim 5,6"), but with it enabled the session then
+     * dies with "relay error", and - the important part - the payload's libc
+     * stdout still does not appear. That means the runtime does not write its
+     * stdout through rwpipe either, so the next thing to establish is which
+     * handle it does use (the UDP pair from kernel_overlap_sockets is the
+     * remaining candidate, and the reference's own servers relay through
+     * sockets). Until then the descriptors stay -1 so the working path is
+     * untouched.
+     */
+    (void)options.relay_out;
+    (void)options.relay_in;
+    session->proc.relay_out = -1;
+    session->proc.relay_in = -1;
+
     session->proc.stdin_fd = -1;
     options.stdin_fd = session->tty.slave_fd;
     {
@@ -898,6 +918,16 @@ psx_session_check_process(psx_session_t *session)
     if(session->proc.stdin_fd >= 0) {
         close(session->proc.stdin_fd);
         session->proc.stdin_fd = -1;
+    }
+
+    if(session->proc.relay_out >= 0) {
+        close(session->proc.relay_out);
+        session->proc.relay_out = -1;
+    }
+
+    if(session->proc.relay_in >= 0) {
+        close(session->proc.relay_in);
+        session->proc.relay_in = -1;
     }
 
     snprintf(session->command, sizeof(session->command), "%s", "psh");
@@ -1436,6 +1466,25 @@ session_forward_to_process(psx_session_t *session, const uint8_t *payload,
         return 0;
     }
 
+    /*
+     * With a relay, the runtime reads its input from the pipe the daemon owns,
+     * so input goes there; it is also written to the terminal because a
+     * payload may read its descriptor directly instead of through libc.
+     */
+    if(session->proc.relay_in >= 0) {
+        if(len == 0) {
+            close(session->proc.relay_in);
+            session->proc.relay_in = -1;
+        } else {
+            ssize_t n = write(session->proc.relay_in, payload, len);
+
+            if(n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                PSX_LOGW("session %u: relay write: %s", session->id,
+                         strerror(errno));
+            }
+        }
+    }
+
     /* Zero-length STDIN is an EOF marker for the foreground process. */
     if(len == 0) {
         if(session->tty.is_real_pty) {
@@ -1874,6 +1923,47 @@ psx_session_on_tty_readable(psx_session_t *session)
 
         PSX_LOGD("session %u: tty read %zd bytes", session->id, n);
 
+        if(psx_session_emit(session, PTTY_MSG_STDOUT, buffer, (size_t)n) < 0) {
+            return -1;
+        }
+    }
+}
+
+/*
+ * The payload runtime's own output.
+ *
+ * A console payload writes its libc stdout through the handles the loader
+ * gives it rather than through fd 1, so this relay is where a normal CLI's
+ * printf output actually arrives. It is presented to the client as ordinary
+ * STDOUT, next to whatever the payload wrote to its descriptor directly.
+ */
+int
+psx_session_on_relay_readable(psx_session_t *session)
+{
+    uint8_t buffer[4096];
+
+    if(session->proc.relay_out < 0) {
+        return 0;
+    }
+
+    for(;;) {
+        ssize_t n = read(session->proc.relay_out, buffer, sizeof(buffer));
+
+        if(n < 0) {
+            if(errno == EINTR) {
+                continue;
+            }
+            if(errno == EAGAIN || errno == EWOULDBLOCK) {
+                return 0;
+            }
+            PSX_LOGW("session %u: relay read: %s", session->id, strerror(errno));
+            return -1;
+        }
+        if(n == 0) {
+            close(session->proc.relay_out);
+            session->proc.relay_out = -1;
+            return 0;
+        }
         if(psx_session_emit(session, PTTY_MSG_STDOUT, buffer, (size_t)n) < 0) {
             return -1;
         }
