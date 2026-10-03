@@ -30,6 +30,18 @@ const char *psx_platform_name(void);
  */
 void psx_platform_notify(const char *message);
 
+/*
+ * Ask the console's payload loader (elfldr, port 9021 on loopback) to run one
+ * command line through tools/exec_wrapper.c, and return the socket that
+ * carries its standard io, or -1 when no loader is reachable.
+ *
+ * This is the path that gives a normal CLI a working standard io on the
+ * console: the loader wires the connection it accepts into the payload it
+ * starts, which is the only configuration measured to deliver a payload's
+ * library output. The caller owns the returned descriptor and pumps it.
+ */
+int psx_platform_loader_exec(const char *command_line);
+
 /* Machine form of the platform name, e.g. "ps5", "ps4", "host". */
 const char *psx_platform_id(void);
 

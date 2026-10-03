@@ -60,6 +60,7 @@ set(PSXTERM_CORE_SOURCES
   platform/${PSXTERM_PLATFORM}/filesystem.c
   platform/${PSXTERM_PLATFORM}/tty.c
   platform/${PSXTERM_PLATFORM}/notify.c
+  platform/${PSXTERM_PLATFORM}/loader.c
   platform/${PSXTERM_PLATFORM}/process.c
 )
 
