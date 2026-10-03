@@ -1038,17 +1038,21 @@ install_stdio_fd(pid_t pid, pid_t owner, int fd, int target)
      */
     imported = (int)pt_rdup(pid, owner, fd);
     if(imported < 0) {
+        PSX_LOGI("ps5: stdio: rdup(%d) for target %d failed", fd, target);
         return -1;
     }
 
     (void)pt_close(pid, target);
 
     if(pt_dup2(pid, imported, target) != target) {
+        PSX_LOGI("ps5: stdio: dup2(%d -> %d) failed", imported, target);
         (void)pt_close(pid, imported);
         return -1;
     }
 
     (void)pt_close(pid, imported);
+
+    PSX_LOGI("ps5: stdio: %d -> %d via %d", fd, target, imported);
 
     return 0;
 }

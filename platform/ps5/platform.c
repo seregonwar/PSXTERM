@@ -1,3 +1,4 @@
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -106,6 +107,10 @@ psx_platform_list_processes(psx_proc_entry_t *entries, size_t max_entries)
 }
 
 /* PSXTerm on PS5: payload-side platform primitives. */
+
+/* Daemon log mirror, because klog is not always available and the loader
+ * connection closes after deployment. */
+#define PSXTERM_LOG_FILE "/data/psxterm/psxtermd.log"
 
 /*
  * Self jailbreak, ported from the reference privilege manager (MemDBG,
@@ -242,8 +247,45 @@ psx_platform_inherit_environ(void)
 void
 psx_platform_log_line(const char *line)
 {
+    static int log_fd = -1;
+    static off_t log_size;
+
     klog_printf("%s", line);
     klog_printf("%s", "\n");
+
+    /*
+     * Mirror to a file as well.
+     *
+     * The console's klog service is not always available (it has been seen
+     * returning nothing), and the daemon's own stdout is the loader
+     * connection, which closes once the payload is deployed - so without this
+     * there is no way to read what a spawn did after the fact. Kept bounded
+     * by rotating in place.
+     */
+    if(log_fd < 0) {
+        log_fd = open(PSXTERM_LOG_FILE, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if(log_fd < 0) {
+            return;
+        }
+    }
+
+    {
+        size_t len = strlen(line);
+
+        if(write(log_fd, line, len) != (ssize_t)len ||
+           write(log_fd, "\n", 1) != 1) {
+            return;
+        }
+
+        log_size += (off_t)len + 1;
+
+        if(log_size > (off_t)(256 * 1024)) {
+            close(log_fd);
+            log_fd = open(PSXTERM_LOG_FILE,
+                          O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            log_size = 0;
+        }
+    }
 }
 
 bool

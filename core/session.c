@@ -756,27 +756,33 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
     options.argv = argv;
     options.envp = envp;
 
-    /*
-     * NOTE (hardware, four configurations measured). Working: the tty for all
-     * three descriptors, where stdin/stdout/stderr share one fd number.
-     * Failing: any variant where stdin is a *different* descriptor - a pipe,
-     * or a socket pair - the payload then runs to completion (its own
-     * breadcrumbs say so, and its write(1) reports success) but its output
-     * never reaches the daemon, even while the first line written right after
-     * exec does appear. That asymmetry points at the redirection step, not at
-     * the descriptor type, and it is the next thing to instrument: log what
-     * each of the three installs actually did in a failing run.
-     */
-    (void)session->proc.stdin_fd;
     session->proc.stdin_fd = -1;
     options.stdin_fd = session->tty.slave_fd;
+    {
+        int stdin_pair[2] = {-1, -1};
+
+        if(psx_socket_pair(stdin_pair) == 0) {
+            psx_set_cloexec(stdin_pair[0], true);
+            psx_set_cloexec(stdin_pair[1], true);
+            psx_set_nonblocking(stdin_pair[0], true);
+            options.stdin_fd = stdin_pair[1];
+            session->proc.stdin_fd = stdin_pair[0];
+        } else {
+            PSX_LOGW("session %u: no stdin pair (%s), using the tty",
+                     session->id, strerror(errno));
+        }
+    }
     options.stdout_fd = session->tty.slave_fd;
     options.stderr_fd = session->tty.slave_fd;
     options.cwd = session->cwd;
 
-#ifdef PSXTERM_HOST
-    /* A real terminal combines both output streams. Host PipeTTY can keep
-     * stderr separate without changing the child's terminal semantics. */
+    /*
+     * A real terminal combines both output streams; without one, stderr gets
+     * its own channel so the client can tell the two apart. Enabled on the
+     * consoles too now: the descriptor install logs which of the three
+     * redirections does what, so the case that used to fail silently is
+     * observable.
+     */
     if(!session->tty.is_real_pty) {
         if(pipe(stderr_pipe) < 0 ||
            psx_set_cloexec(stderr_pipe[0], true) < 0 ||
@@ -795,7 +801,6 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
         }
         options.stderr_fd = stderr_pipe[1];
     }
-#endif
 
     if((pid = psx_spawn(&options)) < 0) {
         int saved_errno = errno;
@@ -1866,6 +1871,8 @@ psx_session_on_tty_readable(psx_session_t *session)
         if(n == 0) {
             return 0;
         }
+
+        PSX_LOGD("session %u: tty read %zd bytes", session->id, n);
 
         if(psx_session_emit(session, PTTY_MSG_STDOUT, buffer, (size_t)n) < 0) {
             return -1;

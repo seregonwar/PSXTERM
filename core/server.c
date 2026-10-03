@@ -557,6 +557,7 @@ server_loop(psx_server_t *server)
         n++;
 
         for(psx_session_t *s = server->sessions.sessions; s; s = s->next) {
+            /* Three entries per session at most: socket, tty, stderr. */
             if(s->state == PSX_SESSION_CLOSED || n + 3 > server->pfds_cap) {
                 continue;
             }
