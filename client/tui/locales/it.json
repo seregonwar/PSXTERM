@@ -31,6 +31,7 @@
   "pane.none": "Nessun terminale aperto",
   "hint.start": "F3 aggiungi una console · F4 apri un terminale",
   "notice.copied": "copiati {0} caratteri negli appunti",
+  "notice.copied_text": "copiati {0} caratteri · {1}",
   "notice.copy_empty": "non c'è nulla da copiare qui",
   "hint.saved": "Console salvata · F4 apri un terminale",
   "hint.flash": "Flash {0} · terminale dedicato",

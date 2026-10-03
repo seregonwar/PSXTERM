@@ -94,6 +94,9 @@ pub struct App {
     /// Screen-space text selection and the size it was made on.
     pub sel: Option<Selection>,
     pub screen: (u16, u16),
+    /// When the selection started over a terminal pane, the rectangle it is
+    /// confined to: dragging must not pull in the sidebar or the buttons.
+    pub sel_bounds: Option<Rect>,
     retiring: Vec<Connection>,
     next_pane: u64,
 }
@@ -118,8 +121,22 @@ impl App {
             text_scroll_limit: 0,
             sel: None,
             screen: (0, 0),
+            sel_bounds: None,
             retiring: vec![],
             next_pane: 1,
+        }
+    }
+
+    /// Keep a point inside the rectangle a selection is confined to.
+    fn clamp_to_selection(&self, point: (u16, u16)) -> (u16, u16) {
+        match self.sel_bounds {
+            Some(rect) if rect.width > 0 && rect.height > 0 => {
+                let x = point.0.clamp(rect.x, rect.x + rect.width - 1);
+                let y = point.1.clamp(rect.y, rect.y + rect.height - 1);
+
+                (x, y)
+            }
+            _ => point,
         }
     }
 
@@ -141,10 +158,26 @@ impl App {
         };
 
         match self.selection_text(sel) {
-            Some(text) if !text.trim().is_empty() => match clipboard::copy(&text) {
-                Ok(count) => self.notice = trf("notice.copied", &[count.to_string()]),
-                Err(e) => self.notice = e.to_string(),
-            },
+            Some(text) if !text.trim().is_empty() => {
+                /* Show what was copied, not only how much: the feedback has to
+                 * say whether the intended text was grabbed. */
+                let preview: String = text
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("")
+                    .trim()
+                    .chars()
+                    .take(40)
+                    .collect();
+
+                match clipboard::copy(&text) {
+                    Ok(count) => {
+                        self.notice =
+                            trf("notice.copied_text", &[count.to_string(), preview])
+                    }
+                    Err(e) => self.notice = e.to_string(),
+                }
+            }
             Some(_) => self.notice = tr("notice.copy_empty").into(),
             None => self.notice = tr("ui.tiny").into(),
         }
@@ -537,25 +570,53 @@ impl App {
             }
             Event::Mouse(m) => match m.kind {
                 MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                    /*
-                     * A press also starts a text selection, so dragging over
-                     * the workspace copies what the user sees. Clicking a pane
-                     * still switches to it: a press without a drag leaves no
-                     * selection and is handled as the click it is.
-                     */
-                    if matches!(self.overlay, Overlay::None) {
-                        self.sel = Some(Selection {
-                            start: (m.column, m.row),
-                            end: (m.column, m.row),
-                        });
-                    }
-
                     let hit = self
                         .hits
                         .iter()
                         .rev()
                         .find(|(r, _)| r.contains((m.column, m.row).into()))
                         .map(|(_, h)| h.clone());
+
+                    /*
+                     * A press starts a text selection only over a pane or empty
+                     * space: buttons, tabs and the sidebar keep their click
+                     * semantics, and a drag inside a pane stays inside it so the
+                     * sidebar and the action list can never end up copied by
+                     * accident.
+                     */
+                    let interactive = matches!(
+                        hit,
+                        Some(Hit::Console)
+                            | Some(Hit::New)
+                            | Some(Hit::Palette)
+                            | Some(Hit::Close(_))
+                            | Some(Hit::Action(_))
+                            | Some(Hit::Choice(_))
+                            | Some(Hit::Confirm(_))
+                    );
+
+                    if matches!(self.overlay, Overlay::None) && !interactive {
+                        self.sel_bounds = match hit {
+                            Some(Hit::Pane(_)) => self
+                                .hits
+                                .iter()
+                                .rev()
+                                .find(|(rect, _)| {
+                                    matches!(hit, Some(Hit::Pane(_)))
+                                        && rect.contains((m.column, m.row).into())
+                                })
+                                .map(|(rect, _)| *rect),
+                            _ => None,
+                        };
+
+                        let at = self.clamp_to_selection((m.column, m.row));
+
+                        self.sel = Some(Selection {
+                            start: at,
+                            end: at,
+                        });
+                    }
+
                     match hit {
                         Some(Hit::Confirm(confirm)) => {
                             if confirm && let Overlay::Form { field, .. } = &mut self.overlay {
@@ -603,8 +664,10 @@ impl App {
                     }
                 }
                 MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                    let at = self.clamp_to_selection((m.column, m.row));
+
                     if let Some(sel) = &mut self.sel {
-                        sel.end = (m.column, m.row);
+                        sel.end = at;
                     }
                 }
                 MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
@@ -613,6 +676,7 @@ impl App {
                     } else {
                         self.sel = None;
                     }
+                    self.sel_bounds = None;
                 }
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                     let delta = if m.kind == MouseEventKind::ScrollUp {

@@ -128,6 +128,18 @@ if(NOT PSXTERM_PLATFORM STREQUAL "host")
       "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libcrypto.a"
       "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libz.a")
     set_target_properties(tlsprobe PROPERTIES SUFFIX ".elf")
+
+    # fetchprobe: the same link set curl uses, libpsl included, so its
+    # behaviour says whether libpsl is where curl stops.
+    add_executable(fetchprobe tools/fetchprobe.c)
+    target_include_directories(fetchprobe PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/include")
+    target_link_libraries(fetchprobe PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libssl.a"
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libcrypto.a"
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libpsl.a"
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libz.a")
+    set_target_properties(fetchprobe PROPERTIES SUFFIX ".elf")
   endif()
 
   # pslist: PS5 bring-up helper that lists processes through sysctl.

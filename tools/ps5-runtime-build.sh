@@ -132,6 +132,12 @@ build_zlib() {
         cmake --build build -j"$JOBS" >/dev/null || exit 1
         cmake --install build >/dev/null || exit 1
     ) || die "zlib build failed"
+
+    # Only the static library may stay in the bundle: a console payload has no
+    # dynamic linker, and our loader does not resolve shared libraries, so a
+    # binary that links libz.so.1 starts and then dies on its own PLT (that is
+    # exactly how curl behaved before this line existed).
+    rm -f "$BUNDLE"/lib/libz.so "$BUNDLE"/lib/libz.so.*
 }
 
 build_openssl() {
@@ -219,12 +225,19 @@ build_curl() {
             echo "warning: CA bundle generation failed, using the fallback"
 
         # Existing prefix contents are picked up through CPPFLAGS/LDFLAGS.
+        #
+        # --without-libpsl is deliberate: measured on hardware, a payload that
+        # links libpsl hangs before its own main (its static constructor never
+        # returns there), and curl was the only thing in this bundle linking
+        # it. The public suffix list only affects cookie handling, which a
+        # download does not need.
         PKG_CONFIG_PATH="$BUNDLE/lib/pkgconfig" \
         CPPFLAGS="-I$BUNDLE/include" \
         LDFLAGS="-L$BUNDLE/lib" \
         ./configure --prefix="$BUNDLE" --host=x86_64-pc-freebsd \
             --enable-static --disable-shared \
             --with-openssl \
+            --without-libpsl \
             --with-ca-bundle="$BUNDLE/etc/ca-bundle.crt" \
             --disable-docs >/dev/null || exit 1
 
