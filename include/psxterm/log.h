@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdbool.h>
+
 typedef enum {
     PSX_LOG_ERROR = 0,
     PSX_LOG_WARN = 1,
@@ -9,6 +11,17 @@ typedef enum {
 
 void psx_log_set_level(psx_log_level_t level);
 psx_log_level_t psx_log_get_level(void);
+
+/*
+ * Whether log lines are also written to the process's standard error.
+ *
+ * A command runner started through the loader shares its standard output with
+ * the user, so it turns this off: the log still reaches the platform sink
+ * (kernel log, file mirror) for diagnosis, but the user's view carries only
+ * what the command itself produced.
+ */
+void psx_log_set_stream(bool enabled);
+bool psx_log_get_stream(void);
 
 void psx_log(psx_log_level_t level, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));

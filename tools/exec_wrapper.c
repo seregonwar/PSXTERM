@@ -28,6 +28,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "psxterm/log.h"
 #include "psxterm/platform.h"
 #include "psxterm/process.h"
 #include "psxterm/runtime.h"
@@ -75,6 +76,13 @@ main(void)
     psx_spawn_failure_t failure;
     int status = -1;
     pid_t pid;
+
+    /*
+     * This process's standard output belongs to the user: the log goes to the
+     * platform sink only, so the internals of running the command never mix
+     * with what the command itself prints.
+     */
+    psx_log_set_stream(false);
 
     if(!psx_platform_init()) {
         printf("PSXTERM-EXIT %d\n", -1);
