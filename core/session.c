@@ -43,6 +43,8 @@ psx_session_create(uint32_t id, int sock_fd)
     session->proc.stdin_fd = -1;
     session->proc.relay_out = -1;
     session->proc.relay_in = -1;
+    session->proc.loader = false;
+    session->proc.exit_code_hint = 0;
     session->proc.stderr_fd = -1;
     session->state = PSX_SESSION_ACCEPTED;
     session->rows = 24;
@@ -729,6 +731,38 @@ psx_session_begin(psx_session_t *session)
 
 /* --- process handling --------------------------------------------------- */
 
+/*
+ * Build the one-line command the wrapper payload reads, from the resolved
+ * path and its arguments. Arguments with spaces or quotes are quoted, because
+ * that line is split on spaces on the other side.
+ */
+static int
+session_build_command_line(const char *path, char *const *argv, char *out,
+                           size_t cap)
+{
+    size_t used = 0;
+    int written = snprintf(out, cap, "%s", path);
+
+    if(written < 0 || (size_t)written >= cap) {
+        return -1;
+    }
+    used = (size_t)written;
+
+    for(size_t i = 1; argv && argv[i]; i++) {
+        bool quote = strpbrk(argv[i], " \t\"'") != NULL;
+
+        written = snprintf(out + used, cap - used, " %s%s%s",
+                           quote ? "\"" : "", argv[i], quote ? "\"" : "");
+
+        if(written < 0 || (size_t)written >= cap - used) {
+            return -1;
+        }
+        used += (size_t)written;
+    }
+
+    return (int)used;
+}
+
 int
 psx_session_spawn_process(psx_session_t *session, const char *path,
                           char *const *argv)
@@ -746,6 +780,40 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
     if(session->tty.backend == PSX_TTY_BACKEND_NONE) {
         errno = ENODEV;
         return -1;
+    }
+
+    /*
+     * On a console the loader is the preferred way to run a command: the
+     * connection it wires in is the only configuration measured to deliver a
+     * CLI's library output, arguments reach the wrapper on that same
+     * connection, and the wrapper reports the exit status. When no loader
+     * answers, the injected spawn below is used, exactly as before.
+     */
+    if(psx_platform_is_target()) {
+        char line[PSX_CMD_LINE_MAX];
+        int fd;
+
+        if(session_build_command_line(path, argv, line, sizeof(line)) > 0 &&
+           (fd = psx_platform_loader_exec(line)) >= 0) {
+            const char *base = strrchr(path, '/');
+
+            session->proc.loader = true;
+            session->proc.pid = 0;
+            session->proc.relay_out = fd;
+            session->proc.relay_in = fd;
+            session->proc.exit_code_hint = 0;
+            session->proc.running = true;
+            session->proc.status = 0;
+            session->proc.started_ms = psx_now_ms();
+
+            snprintf(session->command, sizeof(session->command), "%s",
+                     base ? base + 1 : path);
+
+            PSX_LOGI("session %u: running \"%s\" through the loader",
+                     session->id, line);
+
+            return 0;
+        }
     }
 
     for(size_t i = 0; i < session->env.count; i++) {
@@ -898,6 +966,44 @@ psx_session_check_process(psx_session_t *session)
 
     if(!session->proc.running) {
         return false;
+    }
+
+    /*
+     * A command run through the loader has no pid here: its end of file on the
+     * loader connection is what says it is finished, and the status came in on
+     * that connection as the wrapper's last line.
+     */
+    if(session->proc.loader) {
+        if(session->proc.relay_out >= 0) {
+            return false;
+        }
+
+        PSX_LOGI("session %u: \"%s\" finished through the loader (%d)",
+                 session->id, session->command,
+                 session->proc.exit_code_hint);
+
+        session->proc.running = false;
+        session->proc.loader = false;
+        session->proc.status = session->proc.exit_code_hint;
+        snprintf(session->command, sizeof(session->command), "%s", "psh");
+
+        if(session->proc.relay_in >= 0) {
+            close(session->proc.relay_in);
+            session->proc.relay_in = -1;
+        }
+
+        psx_session_on_tty_readable(session);
+
+        psx_session_emit_exit(session, session->proc.exit_code_hint,
+                              PTTY_EXIT_PROCESS);
+
+        if(session->exec_pending) {
+            session->exec_pending = false;
+            psx_session_emit_exit(session, session->proc.exit_code_hint,
+                                  PTTY_EXIT_SHELL);
+        }
+
+        return true;
     }
 
     rc = psx_process_wait(session->proc.pid, &status, 0);
@@ -1473,8 +1579,18 @@ session_forward_to_process(psx_session_t *session, const uint8_t *payload,
      */
     if(session->proc.relay_in >= 0) {
         if(len == 0) {
-            close(session->proc.relay_in);
-            session->proc.relay_in = -1;
+            /*
+             * End of input for a command run through the loader: shut the
+             * write direction down rather than closing the socket, because the
+             * same connection also carries the command's output and closing it
+             * would cut that off too.
+             */
+            if(session->proc.loader) {
+                shutdown(session->proc.relay_in, SHUT_WR);
+            } else {
+                close(session->proc.relay_in);
+                session->proc.relay_in = -1;
+            }
         } else {
             ssize_t n = write(session->proc.relay_in, payload, len);
 
@@ -1930,6 +2046,52 @@ psx_session_on_tty_readable(psx_session_t *session)
 }
 
 /*
+ * The wrapper payload ends its output with "PSXTERM-EXIT <status>". Keep that
+ * line out of the client's stream and remember the status instead, which is
+ * the only report of it the loader path can give.
+ */
+static int
+session_scan_exit_marker(psx_session_t *session, const uint8_t *data,
+                         size_t len)
+{
+    static const char marker[] = "PSXTERM-EXIT ";
+    const size_t mlen = sizeof(marker) - 1;
+    size_t head = len;
+
+    for(size_t i = 0; i + mlen < len; i++) {
+        if(memcmp(data + i, marker, mlen) != 0) {
+            continue;
+        }
+
+        {
+            char digits[16];
+            size_t k = 0;
+
+            for(size_t j = i + mlen; j < len && k + 1 < sizeof(digits); j++) {
+                if(data[j] < '0' || data[j] > '9') {
+                    break;
+                }
+                digits[k++] = (char)data[j];
+            }
+            digits[k] = '\0';
+
+            if(k > 0) {
+                session->proc.exit_code_hint = atoi(digits);
+                head = i;
+            }
+        }
+        break;
+    }
+
+    if(head > 0 &&
+       psx_session_emit(session, PTTY_MSG_STDOUT, data, head) < 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+/*
  * The payload runtime's own output.
  *
  * A console payload writes its libc stdout through the handles the loader
@@ -1966,9 +2128,20 @@ psx_session_on_relay_readable(psx_session_t *session)
             }
             if(n == 0) {
                 close(*fds[i]);
+                if(session->proc.relay_out == session->proc.relay_in) {
+                    session->proc.relay_in = -1;
+                }
                 *fds[i] = -1;
                 break;
             }
+
+            if(session->proc.loader) {
+                if(session_scan_exit_marker(session, buffer, (size_t)n) < 0) {
+                    return -1;
+                }
+                continue;
+            }
+
             if(psx_session_emit(session, PTTY_MSG_STDOUT, buffer,
                                 (size_t)n) < 0) {
                 return -1;

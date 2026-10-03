@@ -45,6 +45,15 @@ typedef struct {
      */
     int relay_out;
     int relay_in;
+
+    /*
+     * A command run through the console's loader rather than spawned here.
+     * There is no pid to wait for: the command's standard io is the loader
+     * connection, so its end of file is what marks it finished, and the status
+     * arrives on that connection as the wrapper's final line.
+     */
+    bool loader;
+    int exit_code_hint;
 } psx_process_t;
 
 typedef struct {

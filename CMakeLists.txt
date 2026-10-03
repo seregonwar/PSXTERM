@@ -109,6 +109,11 @@ if(NOT PSXTERM_PLATFORM STREQUAL "host")
   target_link_libraries(exec_wrapper PRIVATE psxterm_core)
   set_target_properties(exec_wrapper PROPERTIES SUFFIX ".elf")
 
+  # netprobe: can a payload reach the network? DNS plus a TCP connect, which is
+  # what separates "curl is broken" from "a payload has no network here".
+  add_executable(netprobe tools/netprobe.c)
+  set_target_properties(netprobe PROPERTIES SUFFIX ".elf")
+
   # pslist: PS5 bring-up helper that lists processes through sysctl.
   if(PSXTERM_PLATFORM STREQUAL "ps5")
     add_executable(pslist tools/pslist.c)

@@ -12,6 +12,9 @@
 #define PSX_PATH_MAX 512
 #define PSX_ENV_MAX 64
 
+/* Longest command line a session hands to the console loader. */
+#define PSX_CMD_LINE_MAX 2048
+
 /*
  * Backpressure bounds.
  *

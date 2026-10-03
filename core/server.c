@@ -618,6 +618,7 @@ server_loop(psx_server_t *server)
             }
 
             if(s->proc.relay_in >= 0 &&
+               s->proc.relay_in != s->proc.relay_out &&
                (s->state == PSX_SESSION_RUNNING ||
                 s->state == PSX_SESSION_DETACHED)) {
                 server->pfds[n].fd = s->proc.relay_in;
