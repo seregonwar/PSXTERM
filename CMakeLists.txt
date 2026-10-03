@@ -101,6 +101,13 @@ if(NOT PSXTERM_PLATFORM STREQUAL "host")
   add_executable(hello tools/hello.c)
   set_target_properties(hello PROPERTIES SUFFIX ".elf")
 
+  # psxterm-exec: runs one command for the daemon. Sent through the loader,
+  # whose connection becomes its standard io - the configuration in which a
+  # payload's libc output is visible.
+  add_executable(exec_wrapper tools/exec_wrapper.c)
+  target_link_libraries(exec_wrapper PRIVATE psxterm_core)
+  set_target_properties(exec_wrapper PROPERTIES SUFFIX ".elf")
+
   # pslist: PS5 bring-up helper that lists processes through sysctl.
   if(PSXTERM_PLATFORM STREQUAL "ps5")
     add_executable(pslist tools/pslist.c)
