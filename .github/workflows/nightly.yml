@@ -24,12 +24,12 @@ jobs:
       sha: ${{ steps.identity.outputs.sha }}
       tag: ${{ steps.identity.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Resolve schedule and immutable identity
@@ -60,14 +60,14 @@ jobs:
           - os: macos-15
             target: macos-arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.preflight.outputs.sha }}
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: rustfmt, clippy
       - name: Check client resources and style
@@ -100,7 +100,7 @@ jobs:
         run: |
           set -euo pipefail
           python tools/nightly.py package --target "$PACKAGE_TARGET" --tag "$NIGHTLY_TAG" --sha "$SOURCE_SHA"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: nightly-package-${{ matrix.target }}
           path: |
@@ -111,7 +111,7 @@ jobs:
           retention-days: 14
       - name: Save terminal diagnostics
         if: always() && runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-terminal-diagnostics
           path: build-nightly-tty/
@@ -126,7 +126,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: nightly-package-*
           path: dist
