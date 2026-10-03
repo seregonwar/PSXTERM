@@ -87,6 +87,28 @@ kernel primitives.
 - Only then `curl ... | sh`, which additionally needs the shell substrate
   (pipelines and a standalone `sh`), tracked separately.
 
+## Verified on the console
+
+Measured against the loader on the test console, from the host machine:
+
+| Attempt | Result |
+|---|---|
+| Raw ELF bytes sent to port 9021 (`hello.elf`, 112 KB) | **The payload runs and all five of its lines come back on that socket**, including the two that go through libc (`printf`, `fflush` on stdout) which never reach the session through the injection path. This is the proof the mechanism is right |
+| Same with `curl` (8.1 MB) | The loader closes the connection: the raw path is not meant for payloads that size |
+| URI form (`"file"` magic + `file://data/...` request line) | `[elfldr.elf] Error reading URI payload` - the installed loader rejects it, so the request-line protocol (which is what carries `?args=`) is not available on this console |
+
+Consequences for the plan below:
+
+1. The raw path is the one to use, and it is proven to deliver a payload's
+   libc stdio. It carries no arguments, so arguments need a wrapper payload:
+   the daemon sends the wrapper, and the wrapper receives the command and its
+   arguments over the same socket before doing the privileged part.
+2. The wrapper is also where the exit status comes from, which the loader does
+   not report, and where the shell substrate can grow later.
+3. `curl` is 8 MB and cannot be sent raw; the wrapper can fetch it from the
+   console filesystem itself and spawn it with the existing injection code,
+   which is exactly what it is there for.
+
 ## Sources
 
 - zftpd `src/http/games/ps5_install_helper.c` (loader port, callback port,
