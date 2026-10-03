@@ -36,7 +36,7 @@ Terminology follows the project's strict rules:
 | psxtermd server (poll loop, sessions, timeouts, limits) | IMPLEMENTED, HOST TESTED |
 | `psh` shell + builtins | IMPLEMENTED, HOST TESTED |
 | Host client (raw mode, resize, terminal restore, batch mode) | IMPLEMENTED, HOST TESTED |
-| Ratatui workspace client (console profiles, tabs/splits, flash actions, English/Italian) | IMPLEMENTED, WINDOWS + HOST PROTOCOL TESTED; PS4/PS5 HARDWARE TEST REQUIRED |
+| Ratatui workspace client (console profiles, tabs/splits, flash actions, English/Italian) | IMPLEMENTED, WINDOWS + LINUX HOST TESTED; PS4/PS5 HARDWARE TEST REQUIRED |
 | FreeBSDPTY backend (host POSIX ptmx) | IMPLEMENTED, HOST TESTED |
 | PipeTTY fallback | IMPLEMENTED, HOST TESTED |
 | External execution (host fork/exec) | IMPLEMENTED, HOST TESTED |

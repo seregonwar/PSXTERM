@@ -1,8 +1,8 @@
 # PSXTerm workspace client
 
 The Ratatui client is a separate portable executable, `psxterm-tui`. It talks
-PTTY/1 to an **already running PSXTerm daemon**. It runs natively on Windows;
-Linux and macOS are included in the CI matrix. The existing C client remains
+PTTY/1 to an **already running PSXTerm daemon**. Windows and Linux (WSL) have
+been tested locally; macOS is included in the CI matrix. The existing C client remains
 available for scripts, diagnostics and file transfers.
 
 ## Build and start
@@ -179,6 +179,23 @@ unique metadata and scrolling the complete wrapped license. Native Windows
 terminal smoke testing covered opening the palette, dismissing it, confirming
 quit and restoring the terminal.
 
+The Linux build also has an executable smoke test using a real POSIX PTY at all
+eight sizes. It decodes captured ANSI output with `vt100` and checks the actual
+screens for the flash palette, dismissing it, the small-window hint, restoring
+dimensions, split view, closing/cancelling and quit confirmation. It then verifies
+the alternate screen and original terminal attributes are restored. Demo mode
+keeps this test independent of console availability. Run on Linux with:
+
+```console
+cargo build --release --locked --manifest-path client/tui/Cargo.toml
+cargo build --release --locked --manifest-path client/tui/Cargo.toml --example tty_decode
+python3 client/tui/tests/tty_smoke.py --output build-tui-tty-smoke
+```
+
+The optional output directory contains ANSI transcripts and a JSON result matrix.
+When sharing a checkout between Windows and WSL, use a separate `CARGO_TARGET_DIR`
+and pass its executable and decoder paths through `--executable` and `--decoder`.
+
 The optional real-daemon test requires the host daemon running on localhost:
 
 ```console
@@ -189,6 +206,9 @@ PowerShell equivalent: set `$env:PSXTERM_TEST_PORT='29323'` before the Cargo com
 Local Windows-to-WSL validation covered multiple independent sessions, output,
 resize, ping and detach/resume with the same server session ID. **This is host
 validation, not PS4/PS5 hardware validation.**
+The native Linux client also passed the 26 default tests, both real-daemon
+tests against the local PipeTTY daemon, and the `pwd` and `ping` CLI flashes,
+using the declared minimum Rust 1.88 toolchain.
 Cancellation tests cover fragmented HELLO/OPEN/ATTACH replies, close and detach,
 and waiting for connections belonging to removed tabs. The real-daemon test also
 withholds OPEN_OK after creating a session, cancels the client and verifies the

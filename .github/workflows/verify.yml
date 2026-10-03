@@ -36,6 +36,11 @@ jobs:
         run: cargo test --locked --manifest-path client/tui/Cargo.toml
       - name: Release build
         run: cargo build --release --locked --manifest-path client/tui/Cargo.toml
+      - name: Real terminal interaction and restoration
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --release --locked --manifest-path client/tui/Cargo.toml --example tty_decode
+          python3 client/tui/tests/tty_smoke.py --output build-tui-tty-smoke
       - name: Real host daemon interoperability
         if: runner.os == 'Linux'
         shell: bash
