@@ -65,7 +65,13 @@ psx_server_config_default(psx_server_config_t *config)
     config->handshake_timeout_ms = SERVER_DEFAULT_HANDSHAKE_MS;
     config->idle_timeout_ms = 0;
     config->persist_sessions = true;
-    config->detached_timeout_ms = 30 * 60 * 1000;
+    /*
+     * A detached session is reclaimable after this long. Two minutes keeps a
+     * dropped client reconnectable without letting abandoned sessions use up
+     * the session limit: on the console that limit is small, and every batch
+     * run that outlives its client used to leave one behind for half an hour.
+     */
+    config->detached_timeout_ms = 2 * 60 * 1000;
 }
 
 /* --- handshake ---------------------------------------------------------- */

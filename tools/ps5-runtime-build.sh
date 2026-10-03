@@ -126,6 +126,8 @@ build_zlib() {
         cmake -S . -B build \
             -DCMAKE_TOOLCHAIN_FILE="$PS5_PAYLOAD_SDK/toolchain/prospero.cmake" \
             -DCMAKE_INSTALL_PREFIX="$BUNDLE" \
+            -DBUILD_TESTING=OFF \
+            -DZLIB_BUILD_TESTING=OFF \
             -DZLIB_BUILD_EXAMPLES=OFF >/dev/null || exit 1
         cmake --build build -j"$JOBS" >/dev/null || exit 1
         cmake --install build >/dev/null || exit 1
@@ -147,6 +149,11 @@ build_openssl() {
         cd "$WORK/openssl-$ver" || die "openssl dir missing"
         # shellcheck disable=SC1090
         source "$PS5_PAYLOAD_SDK/toolchain/prospero.sh"
+
+        # The SDK environment stages installs under its own sysroot; the
+        # bundle must receive everything instead.
+        export DESTDIR=
+
         ./Configure BSD-x86_64 no-tests no-apps no-shared \
             --prefix="$BUNDLE" >/dev/null || exit 1
         make -j"$JOBS" build_sw >/dev/null || exit 1
@@ -169,6 +176,11 @@ build_libpsl() {
         cd "$WORK/libpsl-$ver" || die "libpsl dir missing"
         # shellcheck disable=SC1090
         source "$PS5_PAYLOAD_SDK/toolchain/prospero.sh"
+
+        # See the note in build_openssl: install into the bundle, not into the
+        # SDK sysroot the environment stages towards.
+        export DESTDIR=
+
         ./configure --prefix="$BUNDLE" --host=x86_64-pc-freebsd \
             --enable-static --disable-shared --disable-nls \
             --disable-gtk-doc-html >/dev/null || exit 1
@@ -199,6 +211,10 @@ build_curl() {
         # shellcheck disable=SC1090
         source "$PS5_PAYLOAD_SDK/toolchain/prospero.sh"
 
+        # See the note in build_openssl: the bundle is the install target.
+        export DESTDIR=
+
+        # Fetch CA bundle
         ./scripts/mk-ca-bundle.pl >/dev/null 2>&1 ||
             echo "warning: CA bundle generation failed, using the fallback"
 

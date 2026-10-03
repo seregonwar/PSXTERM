@@ -101,11 +101,13 @@ wait_for_stop(pid_t pid, int timeout_ms, int *status_out)
 #define NID_SYSCALL "HoLVWNanBBc"
 #define NID_PIPE "-Jp7F+pXxNg"
 #define NID_GET_PROC_PARAM "959qrazPIrg"
+#define NID_ENVIRON "+2thxYZ4syk"
 
 /* PS5-specific syscall used by libkernel to duplicate a foreign fd. */
 #define SYS_RDUP 0x25b
 #define SYS_PROCESS_NEEDED_AND_RELOCATE 599
 #define SYS_BUDGET_SET 0x23b
+#define SYS_CHDIR 12
 
 /* ------------------------------------------------------------------ */
 /* remote ptrace helpers                                              */
@@ -909,28 +911,63 @@ build_payload_args(pid_t pid)
     }
 }
 
-/* Give the payload's libc an unlimited heap (reference-loader behaviour). */
+/*
+ * Give the payload's libc an unlimited heap (reference-loader behaviour).
+ *
+ * The reference does two things for the unlimited case, and both matter for a
+ * large payload: it writes the heap size, and it copies the libc's own
+ * need-size field over the requested one so the allocator can grow. Only the
+ * first was done here, and a big static binary like curl failed its startup
+ * allocator check with no output at all.
+ */
 static void
 set_heap_size(pid_t pid, int size)
 {
     intptr_t proc_param;
     intptr_t libc_param;
     intptr_t heap_size_addr;
+    intptr_t need_sce_libc;
 
     if(!(proc_param = pt_call(pid, pt_resolve(pid, NID_GET_PROC_PARAM)))) {
+        PSX_LOGW("ps5: heap: no process parameters");
         return;
     }
 
-    if(pt_copyout(pid, proc_param + 56, &libc_param, sizeof(libc_param))) {
+    if(pt_copyout(pid, proc_param + 56, &libc_param, sizeof(libc_param)) ||
+       !libc_param) {
+        PSX_LOGW("ps5: heap: no libc parameters");
         return;
     }
 
     if(pt_copyout(pid, libc_param + 16, &heap_size_addr,
-                  sizeof(heap_size_addr))) {
+                  sizeof(heap_size_addr)) ||
+       !heap_size_addr) {
+        PSX_LOGW("ps5: heap: no heap size field");
         return;
     }
 
-    pt_setint(pid, heap_size_addr, size);
+    if(pt_setint(pid, heap_size_addr, size)) {
+        PSX_LOGW("ps5: heap: cannot write the heap size");
+        return;
+    }
+
+    if(size != -1) {
+        PSX_LOGI("ps5: heap: set to %d", size);
+        return;
+    }
+
+    if(pt_copyout(pid, libc_param + 72, &need_sce_libc,
+                  sizeof(need_sce_libc))) {
+        PSX_LOGW("ps5: heap: no libc need-size field");
+        return;
+    }
+
+    if(pt_setlong(pid, libc_param + 32, need_sce_libc)) {
+        PSX_LOGW("ps5: heap: cannot grow the requested size");
+        return;
+    }
+
+    PSX_LOGI("ps5: heap: unlimited");
 }
 
 /* ------------------------------------------------------------------ */
@@ -1010,6 +1047,88 @@ raise_target_privileges_minimal(pid_t pid)
     kernel_set_proc_jaildir(pid, 0);
     kernel_set_ucred_uid(pid, 0);
     kernel_set_ucred_caps(pid, caps);
+}
+
+/*
+ * Install the environment in the target and point libc's `environ` symbol at
+ * it, the way the reference loader does. A payload reads its environment
+ * through that symbol, not through the register that carried the arguments:
+ * leaving it as the eboot left it is how a payload that calls getenv() dies
+ * before printing anything.
+ */
+static int
+set_environ(pid_t pid, char *const *envp)
+{
+    size_t count = 0;
+    size_t size = sizeof(char *);
+    intptr_t addr;
+    intptr_t pos;
+    intptr_t environ_addr;
+
+    if(!envp || !envp[0]) {
+        return 0;
+    }
+
+    while(envp[count]) {
+        size += sizeof(char *) + strlen(envp[count]) + 1;
+        count++;
+    }
+    size = (size_t)ROUND_PG(size);
+
+    if((addr = pt_mmap(pid, 0, size, PROT_WRITE | PROT_READ,
+                       MAP_ANONYMOUS | MAP_PRIVATE, -1, 0)) == -1) {
+        return -1;
+    }
+
+    pos = addr + (intptr_t)((count + 1) * sizeof(char *));
+
+    for(size_t i = 0; i < count; i++) {
+        size_t len = strlen(envp[i]) + 1;
+
+        if(pt_copyin(pid, envp[i], pos, len) ||
+           pt_setlong(pid, addr + (intptr_t)(i * sizeof(char *)), pos)) {
+            pt_munmap(pid, addr, size);
+            return -1;
+        }
+        pos += (intptr_t)len;
+    }
+
+    if(pt_setlong(pid, addr + (intptr_t)(count * sizeof(char *)), 0)) {
+        pt_munmap(pid, addr, size);
+        return -1;
+    }
+
+    if(!(environ_addr = pt_resolve(pid, NID_ENVIRON)) ||
+       pt_setlong(pid, environ_addr, addr)) {
+        pt_munmap(pid, addr, size);
+        return -1;
+    }
+
+    return 0;
+}
+
+/* Change the target's working directory, so a spawned CLI starts where the
+ * session is. */
+static int
+set_cwd(pid_t pid, const char *cwd)
+{
+    intptr_t buf;
+
+    if(!cwd || !*cwd) {
+        cwd = "/";
+    }
+
+    if((buf = pt_mmap(pid, 0, PAGE_SIZE, PROT_READ | PROT_WRITE,
+                      MAP_ANONYMOUS | MAP_PRIVATE, -1, 0)) == -1) {
+        return -1;
+    }
+
+    pt_copyin(pid, cwd, buf, strlen(cwd) + 1);
+    (void)pt_syscall(pid, SYS_CHDIR, buf);
+    pt_msync(pid, buf, PAGE_SIZE, MS_SYNC);
+    pt_munmap(pid, buf, PAGE_SIZE);
+
+    return 0;
 }
 
 /*
@@ -1344,6 +1463,14 @@ psx_platform_spawn(const psx_spawn_options_t *options,
     /* Wire stdio to the session tty before starting the payload. */
     stage_set(failure, PSX_SPAWN_STAGE_DUP_STDIO, 0, NULL);
 
+    if(set_environ(pid, options->envp) != 0) {
+        PSX_LOGW("ps5: environment could not be installed in the victim");
+    }
+
+    if(options->cwd) {
+        (void)set_cwd(pid, options->cwd);
+    }
+
     /*
      * The child already replaced its standard descriptors with the session
      * ones before execve (see ps5_rfork_entry): if they survived, this only
@@ -1453,15 +1580,19 @@ psx_platform_spawn(const psx_spawn_options_t *options,
      * connected", which is otherwise indistinguishable from the outside.
      */
     {
-        int status = 0;
         struct timespec settle = {.tv_sec = 0, .tv_nsec = 200 * 1000 * 1000};
 
         nanosleep(&settle, NULL);
 
-        if(waitpid(pid, &status, WNOHANG) == pid) {
-            PSX_LOGE("ps5: payload exited at start (status %d, exit %d, sig %d)",
-                     status, WIFEXITED(status) ? WEXITSTATUS(status) : -1,
-                     WIFSIGNALED(status) ? WTERMSIG(status) : -1);
+        /*
+         * Liveness only, and without reaping: the session must still be able
+         * to collect the status, and a waitpid here used to steal it (the log
+         * showed "waitpid failed: No child processes" right after). waitid
+         * with WNOWAIT would peek, but the payload SDK's libc does not export
+         * it, so the cheap existence check is what remains.
+         */
+        if(kill(pid, 0) != 0 && errno == ESRCH) {
+            PSX_LOGE("ps5: payload exited at start");
         } else {
             PSX_LOGI("ps5: payload alive after start");
         }
