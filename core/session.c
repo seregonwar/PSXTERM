@@ -1001,7 +1001,39 @@ psx_session_check_process(psx_session_t *session)
             session->proc.relay_in = -1;
         }
 
-        psx_session_on_tty_readable(session);
+        if(session->proc.relay_out >= 0) {
+            close(session->proc.relay_out);
+            session->proc.relay_out = -1;
+        }
+
+        /* Whatever the command left behind is forwarded before the prompt, so
+         * the shell comes back exactly as it does after a locally spawned
+         * process. */
+        for(int pass = 0; pass < 16; pass++) {
+            size_t before = psx_buf_pending(&session->out);
+
+            psx_session_on_tty_readable(session);
+            psx_session_on_stderr_readable(session);
+
+            if(psx_buf_pending(&session->out) == before) {
+                break;
+            }
+        }
+
+        if(session->proc.stderr_fd >= 0) {
+            close(session->proc.stderr_fd);
+            session->proc.stderr_fd = -1;
+        }
+
+        if(psx_buf_pending(&session->in) > 0) {
+            session->input_discarded_bytes += psx_buf_pending(&session->in);
+            psx_buf_free(&session->in);
+            psx_buf_init(&session->in);
+        }
+
+        if(session->tty_input_closed) {
+            session_reopen_tty(session);
+        }
 
         psx_session_emit_exit(session, session->proc.exit_code_hint,
                               PTTY_EXIT_PROCESS);
@@ -1010,6 +1042,12 @@ psx_session_check_process(psx_session_t *session)
             session->exec_pending = false;
             psx_session_emit_exit(session, session->proc.exit_code_hint,
                                   PTTY_EXIT_SHELL);
+        }
+
+        /* The prompt is what tells the user the shell is ready again: without
+         * it the session looked hung after every command run this way. */
+        if(session->shell && session->state == PSX_SESSION_RUNNING) {
+            psh_shell_prompt(session->shell);
         }
 
         return true;
