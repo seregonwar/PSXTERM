@@ -1105,6 +1105,13 @@ run_pull(int fd, ptty_reader_t *reader, const char *remote, const char *local)
 }
 
 static void
+client_disconnect(int fd, ptty_reader_t *reader)
+{
+    ptty_reader_destroy(reader);
+    close(fd);
+}
+
+static void
 usage(const char *argv0)
 {
     printf("usage: %s [options] <host>\n", argv0);
@@ -1251,7 +1258,7 @@ main(int argc, char **argv)
     if(!(hello_len = ptty_hello_encode(hello, sizeof(hello), CLIENT_NAME,
                                        token))) {
         fprintf(stderr, "psxterm: cannot encode HELLO\n");
-        close(fd);
+        client_disconnect(fd, &reader);
         return 1;
     }
 
@@ -1259,7 +1266,7 @@ main(int argc, char **argv)
        wait_frame(&reader, fd, &header, &payload, 5000) != 0 ||
        header.type != PTTY_MSG_HELLO_ACK) {
         fprintf(stderr, "psxterm: handshake failed\n");
-        close(fd);
+        client_disconnect(fd, &reader);
         return 1;
     }
 
@@ -1275,7 +1282,7 @@ main(int argc, char **argv)
             fprintf(stderr, "psxterm: server refused the connection\n");
         }
 
-        close(fd);
+        client_disconnect(fd, &reader);
         return 1;
     }
 
@@ -1314,7 +1321,7 @@ main(int argc, char **argv)
 
         if(send_frame(fd, PTTY_MSG_SHUTDOWN, NULL, 0) < 0) {
             fprintf(stderr, "psxterm: cannot request shutdown\n");
-            close(fd);
+            client_disconnect(fd, &reader);
             return 1;
         }
 
@@ -1328,7 +1335,7 @@ main(int argc, char **argv)
             }
         }
 
-        close(fd);
+        client_disconnect(fd, &reader);
 
         if(!acknowledged) {
             fprintf(stderr,
@@ -1367,7 +1374,7 @@ main(int argc, char **argv)
            wait_frame(&reader, fd, &header, &payload, 5000) != 0 ||
            header.type != PTTY_MSG_OPEN_OK) {
             fprintf(stderr, "psxterm: cannot open session\n");
-            close(fd);
+            client_disconnect(fd, &reader);
             return 1;
         }
     }
@@ -1380,13 +1387,13 @@ main(int argc, char **argv)
         if(attach_id == 0 || !resume) {
             fprintf(stderr,
                     "psxterm: attach needs a session id and --resume TOKEN\n");
-            close(fd);
+            client_disconnect(fd, &reader);
             return EXIT_USAGE;
         }
 
         fflush(stdout);
         status = run_attach(fd, &reader, attach_id, resume, use_raw);
-        close(fd);
+        client_disconnect(fd, &reader);
 
         return status;
     }
@@ -1396,7 +1403,7 @@ main(int argc, char **argv)
 
         fflush(stdout);
         status = run_sessions(fd, &reader);
-        close(fd);
+        client_disconnect(fd, &reader);
 
         return status;
     }
@@ -1407,7 +1414,7 @@ main(int argc, char **argv)
         if(push_mode) {
             if(!arg_a || !arg_b) {
                 fprintf(stderr, "psxterm: push needs <local> <remote>\n");
-                close(fd);
+                client_disconnect(fd, &reader);
                 return EXIT_USAGE;
             }
             status = run_push(fd, &reader, arg_a, arg_b);
@@ -1417,7 +1424,7 @@ main(int argc, char **argv)
 
             if(!arg_a) {
                 fprintf(stderr, "psxterm: install needs <local>\n");
-                close(fd);
+                client_disconnect(fd, &reader);
                 return EXIT_USAGE;
             }
 
@@ -1428,7 +1435,7 @@ main(int argc, char **argv)
                snprintf(remote, sizeof(remote), "/data/psxterm/bin/%s",
                         base) >= (int)sizeof(remote)) {
                 fprintf(stderr, "psxterm: invalid install path\n");
-                close(fd);
+                client_disconnect(fd, &reader);
                 return EXIT_USAGE;
             }
 
@@ -1436,13 +1443,13 @@ main(int argc, char **argv)
         } else {
             if(!arg_a || !arg_b) {
                 fprintf(stderr, "psxterm: pull needs <remote> <local>\n");
-                close(fd);
+                client_disconnect(fd, &reader);
                 return EXIT_USAGE;
             }
             status = run_pull(fd, &reader, arg_a, arg_b);
         }
 
-        close(fd);
+        client_disconnect(fd, &reader);
         return status;
     }
 
@@ -1451,7 +1458,7 @@ main(int argc, char **argv)
 
         fflush(stdout);
         status = run_doctor(fd, &reader, json);
-        close(fd);
+        client_disconnect(fd, &reader);
 
         return status;
     }
@@ -1460,13 +1467,13 @@ main(int argc, char **argv)
         int status = run_exec(fd, &reader, exec_command);
 
         restore_terminal();
-        close(fd);
+        client_disconnect(fd, &reader);
 
         return status;
     }
 
     run_interactive(fd, &reader, use_raw);
-    close(fd);
+    client_disconnect(fd, &reader);
 
     return 0;
 }

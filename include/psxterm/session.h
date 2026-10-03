@@ -197,6 +197,7 @@ int psx_session_on_socket_readable(psx_session_t *session);
 
 /* TTY side: forward foreground process output to the client. */
 int psx_session_on_tty_readable(psx_session_t *session);
+int psx_session_on_stderr_readable(psx_session_t *session);
 
 /* Reap a finished foreground process and emit EXIT. Returns true if reaped. */
 bool psx_session_check_process(psx_session_t *session);

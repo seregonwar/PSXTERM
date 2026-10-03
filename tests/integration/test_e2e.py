@@ -100,11 +100,20 @@ class Daemon:
                 raise RuntimeError("daemon exited early; log: %s" %
                                    self.read_log())
             try:
-                with socket.create_connection(("127.0.0.1", self.port), 0.2):
-                    # The probe connection is accepted as a session; give the
-                    # daemon a tick to reap it before tests open real sessions.
-                    time.sleep(0.2)
+                probe = Client(self, open_session=False, name="readiness-probe")
+                try:
+                    if probe.ack_status not in (ACK_OK, ACK_AUTH_FAILED):
+                        raise RuntimeError("daemon refused readiness handshake")
+                    # Wait for the server to reclaim the probe's session slot.
+                    # Sleeping while the socket was still open let the first
+                    # real client race that cleanup, especially with a limit of 1.
+                    if probe.ack_status == ACK_OK:
+                        probe.send(CLOSE)
+                    if not probe.expect_eof(timeout=max(0.1, deadline - time.time())):
+                        raise RuntimeError("daemon did not close readiness session")
                     return
+                finally:
+                    probe.close()
             except OSError:
                 time.sleep(0.02)
         raise RuntimeError("daemon did not start listening")
@@ -731,6 +740,135 @@ def test_pipe_tty_forced_pty():
         check("isatty: stdin=1 stdout=1 stderr=1" in text,
               "forced PTY did not provide a terminal: %r" % text)
         client.close()
+
+
+def test_pipe_tty_stdio_matrix_and_reuse():
+    """Host fork/exec: interactive reads, binary input, EOF and separate output."""
+    stdout_markers = (
+        b"matrix: write stdout\n",
+        b"matrix: printf stdout\n",
+        b"matrix: fprintf stdout\n",
+        b"matrix: puts stdout\n",
+        b"matrix: input eof=1 error=0\n",
+        b"matrix: fflush stdout=0 stderr=0\n",
+    )
+    stderr_markers = (
+        b"cli_test: stderr works\n",
+        b"matrix: write stderr\n",
+        b"matrix: fprintf stderr\n",
+    )
+    with Daemon("--tty", "pipe") as daemon:
+        client = Client(daemon)
+        try:
+            client.drain()
+            baseline_fds = daemon.fd_count()
+            # Reuse one session after each irreversible PipeTTY input shutdown.
+            for line, tail in ((b"first line", b"tail\x00\xff\x80"),
+                               (b"second line", b"")):
+                output = {STDOUT: bytearray(), STDERR: bytearray()}
+                client.send(EXEC, os.path.join(BUILD, "cli_test").encode())
+
+                def collect_until(marker):
+                    deadline = time.monotonic() + 5
+                    while marker not in output[STDOUT]:
+                        remaining = deadline - time.monotonic()
+                        check(remaining > 0, "stdio marker missing: %r" % marker)
+                        header, payload = client.read_frame(timeout=remaining)
+                        check(header[0] not in (EXIT, CLOSE),
+                              "process ended before interactive marker %r" % marker)
+                        if header[0] in output:
+                            output[header[0]].extend(payload)
+
+                collect_until(b"stdin> ")
+                client.send(STDIN, line + b"\n")
+                # fgets must return a line while the input stream remains open.
+                collect_until(b"read=" + line + b"\n")
+                if tail:
+                    client.send(STDIN, tail)
+                client.send(STDIN, b"")
+
+                deadline = time.monotonic() + 5
+                exit_status = None
+                while time.monotonic() < deadline:
+                    header, payload = client.read_frame(
+                        timeout=max(0.05, deadline - time.monotonic()))
+                    if header[0] in output:
+                        output[header[0]].extend(payload)
+                    elif header[0] == EXIT and len(payload) >= 5:
+                        if payload[4] == EXIT_SHELL:
+                            exit_status = struct.unpack("<i", payload[:4])[0]
+                            break
+                    elif header[0] == CLOSE:
+                        break
+
+                check(exit_status == 7, "stdio probe exit status %r" % exit_status)
+                for marker in stdout_markers:
+                    check(marker in output[STDOUT],
+                          "stdout marker missing after EOF: %r" % marker)
+                    check(marker not in output[STDERR],
+                          "stdout marker leaked to stderr: %r" % marker)
+                for marker in stderr_markers:
+                    check(marker in output[STDERR],
+                          "stderr marker missing after EOF: %r" % marker)
+                    check(marker not in output[STDOUT],
+                          "stderr marker leaked to stdout: %r" % marker)
+                check(b"matrix: fread=%d\n" % len(tail) in output[STDOUT],
+                      "fread returned the wrong byte count")
+                check(b"matrix: fread-hex=" + tail.hex().encode() + b"\n"
+                      in output[STDOUT], "binary stdin bytes were changed")
+
+            text, status, _ = client.execute("pwd")
+            check(status == 0 and os.getcwd() in text,
+                  "session unusable after repeated process stdin EOF")
+            check(daemon.fd_count() == baseline_fds,
+                  "process stdio descriptors leaked after EOF and session reuse")
+        finally:
+            client.close()
+
+
+def test_pipe_tty_detached_stderr():
+    with Daemon("--tty", "pipe") as daemon:
+        client = Client(daemon)
+        client.drain()
+        client.send(EXEC, b'/bin/sh -c "sleep 1; echo DETACHED-STDERR >&2"')
+        client.detach()
+        time.sleep(1.4)
+
+        resumed = Client(daemon, open_session=False)
+        try:
+            ok, reason, _ = resumed.attach(client.session_id, client.resume_token)
+            check(ok, "stderr session attach failed: %r" % reason)
+            # Scrollback currently stores terminal bytes, without channel tags.
+            text = resumed.text_of(resumed.drain(quiet=0.4))
+            check("DETACHED-STDERR" in text,
+                  "stderr produced while detached was not retained")
+            _, status, _ = resumed.execute("pwd")
+            check(status == 0, "session unusable after detached stderr")
+        finally:
+            resumed.close()
+
+
+def test_client_binary_pipe_stdio():
+    with Daemon("--tty", "pipe") as daemon:
+        result = subprocess.run(
+            [os.path.join(BUILD, "psxterm"), "127.0.0.1", "-p",
+             str(daemon.port), "-e", os.path.join(BUILD, "cli_test")],
+            input=b"client line\nclient-tail\x00\xff",
+            capture_output=True, timeout=10)
+        check(result.returncode == 7,
+              "client did not propagate stdio probe exit status: %r" % result)
+        check(b"read=client line\n" in result.stdout,
+              "client did not forward interactive input")
+        check(b"matrix: fread-hex=636c69656e742d7461696c00ff\n" in result.stdout,
+              "client binary input changed or output was lost after EOF")
+        check(b"matrix: fflush stdout=0 stderr=0\n" in result.stdout,
+              "client did not receive the final stdout marker")
+        for marker in (b"cli_test: stderr works\n",
+                       b"matrix: write stderr\n",
+                       b"matrix: fprintf stderr\n"):
+            check(marker in result.stderr, "client lost stderr marker %r" % marker)
+            check(marker not in result.stdout,
+                  "client mixed stderr into stdout: %r" % marker)
 
 
 def test_doctor_human():
@@ -1395,6 +1533,9 @@ TESTS = [
     test_interrupt_via_signal_frame,
     test_pipe_tty_fallback,
     test_pipe_tty_forced_pty,
+    test_pipe_tty_stdio_matrix_and_reuse,
+    test_pipe_tty_detached_stderr,
+    test_client_binary_pipe_stdio,
     test_doctor_human,
     test_doctor_json,
     test_doctor_reports_busy_session,

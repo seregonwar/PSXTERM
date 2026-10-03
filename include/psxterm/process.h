@@ -32,6 +32,10 @@ typedef struct {
      * the descriptors the process writes its output to.
      */
     int stdin_fd;
+
+    /* Session-owned read end of a separately captured stderr stream, or -1
+     * when the backend writes both output streams to the terminal. */
+    int stderr_fd;
 } psx_process_t;
 
 typedef struct {

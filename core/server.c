@@ -530,7 +530,7 @@ server_handle_error(psx_server_t *server, psx_session_t *session,
 static int
 server_loop(psx_server_t *server)
 {
-    size_t cap = 2 + server->config->max_sessions * 2;
+    size_t cap = 2 + server->config->max_sessions * 3;
 
     server->pfds = calloc(cap, sizeof(struct pollfd));
     server->owners = calloc(cap, sizeof(uint32_t));
@@ -557,7 +557,7 @@ server_loop(psx_server_t *server)
         n++;
 
         for(psx_session_t *s = server->sessions.sessions; s; s = s->next) {
-            if(s->state == PSX_SESSION_CLOSED || n + 2 > server->pfds_cap) {
+            if(s->state == PSX_SESSION_CLOSED || n + 3 > server->pfds_cap) {
                 continue;
             }
 
@@ -587,6 +587,15 @@ server_loop(psx_server_t *server)
                 if(psx_buf_pending(&s->in) > 0) {
                     server->pfds[n].events |= POLLOUT;
                 }
+                server->owners[n] = s->id;
+                n++;
+            }
+
+            if(s->proc.stderr_fd >= 0 &&
+               (s->state == PSX_SESSION_RUNNING ||
+                s->state == PSX_SESSION_DETACHED)) {
+                server->pfds[n].fd = s->proc.stderr_fd;
+                server->pfds[n].events = POLLIN;
                 server->owners[n] = s->id;
                 n++;
             }
@@ -650,6 +659,16 @@ server_loop(psx_server_t *server)
                         if(psx_session_flush_tty_input(session) < 0) {
                             server_handle_error(server, session, "tty error");
                             continue;
+                        }
+                    }
+                    continue;
+                }
+
+                if(session->proc.stderr_fd >= 0 &&
+                   server->pfds[i].fd == session->proc.stderr_fd) {
+                    if(revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) {
+                        if(psx_session_on_stderr_readable(session) < 0) {
+                            server_handle_error(server, session, "stderr error");
                         }
                     }
                     continue;

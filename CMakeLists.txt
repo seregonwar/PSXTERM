@@ -68,6 +68,7 @@ target_include_directories(psxterm_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 if(PSXTERM_PLATFORM STREQUAL "host")
+  target_compile_definitions(psxterm_core PRIVATE PSXTERM_HOST=1)
   find_package(Threads REQUIRED)
   target_link_libraries(psxterm_core PUBLIC Threads::Threads)
 else()

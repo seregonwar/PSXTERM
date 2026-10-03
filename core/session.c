@@ -41,6 +41,7 @@ psx_session_create(uint32_t id, int sock_fd)
     session->sock_fd = sock_fd;
     session->file_fd = -1;
     session->proc.stdin_fd = -1;
+    session->proc.stderr_fd = -1;
     session->state = PSX_SESSION_ACCEPTED;
     session->rows = 24;
     session->cols = 80;
@@ -89,6 +90,13 @@ psx_session_destroy(psx_session_t *session)
             psx_process_wait(session->proc.pid, &status, 200);
         }
         session->proc.running = false;
+    }
+
+    if(session->proc.stdin_fd >= 0) {
+        close(session->proc.stdin_fd);
+    }
+    if(session->proc.stderr_fd >= 0) {
+        close(session->proc.stderr_fd);
     }
 
     psh_shell_destroy(session->shell);
@@ -726,6 +734,7 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
     psx_spawn_options_t options;
     char *envp[PSX_ENV_MAX + 1];
     pid_t pid;
+    int stderr_pipe[2] = {-1, -1};
 
     if(session->proc.running) {
         errno = EBUSY;
@@ -765,10 +774,44 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
     options.stderr_fd = session->tty.slave_fd;
     options.cwd = session->cwd;
 
+#ifdef PSXTERM_HOST
+    /* A real terminal combines both output streams. Host PipeTTY can keep
+     * stderr separate without changing the child's terminal semantics. */
+    if(!session->tty.is_real_pty) {
+        if(pipe(stderr_pipe) < 0 ||
+           psx_set_cloexec(stderr_pipe[0], true) < 0 ||
+           psx_set_cloexec(stderr_pipe[1], true) < 0 ||
+           psx_set_nonblocking(stderr_pipe[0], true) < 0) {
+            int saved_errno = errno;
+
+            if(stderr_pipe[0] >= 0) {
+                close(stderr_pipe[0]);
+            }
+            if(stderr_pipe[1] >= 0) {
+                close(stderr_pipe[1]);
+            }
+            errno = saved_errno;
+            return -1;
+        }
+        options.stderr_fd = stderr_pipe[1];
+    }
+#endif
+
     if((pid = psx_spawn(&options)) < 0) {
+        int saved_errno = errno;
+
+        if(stderr_pipe[0] >= 0) {
+            close(stderr_pipe[0]);
+            close(stderr_pipe[1]);
+        }
+        errno = saved_errno;
         return -1;
     }
 
+    if(stderr_pipe[1] >= 0) {
+        close(stderr_pipe[1]);
+    }
+    session->proc.stderr_fd = stderr_pipe[0];
     session->proc.pid = pid;
     session->proc.running = true;
     session->proc.status = 0;
@@ -865,10 +908,16 @@ psx_session_check_process(psx_session_t *session)
         size_t before = psx_buf_pending(&session->out);
 
         psx_session_on_tty_readable(session);
+        psx_session_on_stderr_readable(session);
 
         if(psx_buf_pending(&session->out) == before) {
             break;
         }
+    }
+
+    if(session->proc.stderr_fd >= 0) {
+        close(session->proc.stderr_fd);
+        session->proc.stderr_fd = -1;
     }
 
     /*
@@ -1819,6 +1868,39 @@ psx_session_on_tty_readable(psx_session_t *session)
         }
 
         if(psx_session_emit(session, PTTY_MSG_STDOUT, buffer, (size_t)n) < 0) {
+            return -1;
+        }
+    }
+}
+
+int
+psx_session_on_stderr_readable(psx_session_t *session)
+{
+    uint8_t buffer[4096];
+
+    if(session->proc.stderr_fd < 0) {
+        return 0;
+    }
+
+    for(;;) {
+        ssize_t n = read(session->proc.stderr_fd, buffer, sizeof(buffer));
+
+        if(n < 0) {
+            if(errno == EINTR) {
+                continue;
+            }
+            if(errno == EAGAIN || errno == EWOULDBLOCK) {
+                return 0;
+            }
+            PSX_LOGW("session %u: stderr read: %s", session->id, strerror(errno));
+            return -1;
+        }
+        if(n == 0) {
+            close(session->proc.stderr_fd);
+            session->proc.stderr_fd = -1;
+            return 0;
+        }
+        if(psx_session_emit(session, PTTY_MSG_STDERR, buffer, (size_t)n) < 0) {
             return -1;
         }
     }

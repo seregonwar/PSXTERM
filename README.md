@@ -186,7 +186,7 @@ expose the daemon to untrusted networks while authentication is disabled.
 
 * 9 host unit suites via CTest (protocol, parser, env, registry, session,
   tty, shell, diagnostics, runtime).
-* 42 host integration tests driving a real daemon with an independent Python
+* 45 host integration tests driving a real daemon with an independent Python
   implementation of PTTY/1, covering malformed input, authentication, session
   limits, resize, signals, multi-session isolation, timeouts, the doctor
   command (human, JSON, busy session, client binary), capabilities,
@@ -194,6 +194,10 @@ expose the daemon to untrusted networks while authentication is disabled.
   scrollback truncation, file transfer (roundtrip, atomicity, path safety,
   client binary), runtime metadata JSON escaping and restart preservation,
   manifest failure reporting and a disconnect/fd-leak stress loop.
+* The host PipeTTY stdio matrix checks live `fgets`, binary `fread`, output
+  after stdin EOF, separate stdout/stderr channels, the real client, session
+  reuse, descriptor cleanup and detached stderr. See
+  [docs/STDIO_HOST.md](docs/STDIO_HOST.md) for the scope and console limitation.
 * `cli_test` is the controlled external-execution target (argv, environment,
   `isatty`, window size, stdin, stdout/stderr, exit code 7).
 

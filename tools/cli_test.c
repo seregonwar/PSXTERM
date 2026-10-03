@@ -156,6 +156,22 @@ main(int argc, char **argv)
 
         block[got] = '\0';
         printf("matrix: fread=%zu\n", got);
+        printf("matrix: fread-hex=");
+        for(size_t i = 0; i < got; i++) {
+            printf("%02x", (unsigned int)(unsigned char)block[i]);
+        }
+        printf("\n");
+        printf("matrix: input eof=%d error=%d\n", feof(stdin) ? 1 : 0,
+               ferror(stdin) ? 1 : 0);
+        fflush(stdout);
+    }
+
+    {
+        int stdout_result = fflush(stdout);
+        int stderr_result = fflush(stderr);
+
+        printf("matrix: fflush stdout=%d stderr=%d\n", stdout_result,
+               stderr_result);
         fflush(stdout);
     }
 
