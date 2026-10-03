@@ -47,6 +47,7 @@ set(PSXTERM_CORE_SOURCES
   core/instance.c
   core/diag.c
   core/runtime.c
+  core/clock.c
   shell/shell.c
   shell/parser.c
   shell/env.c
@@ -113,6 +114,21 @@ if(NOT PSXTERM_PLATFORM STREQUAL "host")
   # what separates "curl is broken" from "a payload has no network here".
   add_executable(netprobe tools/netprobe.c)
   set_target_properties(netprobe PROPERTIES SUFFIX ".elf")
+
+  # tlsprobe: does TLS work inside a payload? Built against the same OpenSSL
+  # the curl bundle was linked with, and only when that bundle exists
+  # (tools/ps5-runtime-build.sh produces it).
+  if(PSXTERM_PLATFORM STREQUAL "ps5" AND
+     EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libssl.a")
+    add_executable(tlsprobe tools/tlsprobe.c)
+    target_include_directories(tlsprobe PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/include")
+    target_link_libraries(tlsprobe PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libssl.a"
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libcrypto.a"
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libz.a")
+    set_target_properties(tlsprobe PROPERTIES SUFFIX ".elf")
+  endif()
 
   # pslist: PS5 bring-up helper that lists processes through sysctl.
   if(PSXTERM_PLATFORM STREQUAL "ps5")

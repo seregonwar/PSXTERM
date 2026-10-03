@@ -1139,6 +1139,15 @@ main(int argc, char **argv)
     }
 
     /*
+     * The console clock can be years off (measured: 2012), which makes every
+     * certificate invalid and blocks validated HTTPS. Correct it before
+     * anything serves a network request.
+     */
+    if(!doctor) {
+        psx_clock_sync_if_needed();
+    }
+
+    /*
      * The runtime layout is what external CLI processes expect: home, tmp,
      * XDG locations, certificate bundle. Create it before serving, but never
      * refuse to start because of it.

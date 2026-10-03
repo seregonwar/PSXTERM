@@ -34,6 +34,15 @@ int psx_path_join(char *out, size_t out_cap, const char *a, const char *b);
 int psx_socket_pair(int fds[2]);
 
 /*
+ * Correct the system clock when it is clearly wrong, using one SNTP request.
+ *
+ * Measured on the console: the kernel clock reported 2012, which makes every
+ * modern certificate invalid and blocks validated HTTPS anywhere on the
+ * system. Returns true when the clock is (or becomes) plausible.
+ */
+bool psx_clock_sync_if_needed(void);
+
+/*
  * Growable byte buffer used for both framed output queues and parsing
  * scratch space. The buffer keeps a read offset so partially flushed data
  * does not need to be memmoved on every write.
