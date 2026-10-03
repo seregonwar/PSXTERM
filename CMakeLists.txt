@@ -140,6 +140,18 @@ if(NOT PSXTERM_PLATFORM STREQUAL "host")
       "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libpsl.a"
       "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libz.a")
     set_target_properties(fetchprobe PROPERTIES SUFFIX ".elf")
+
+    # psxterm-fetch: a real downloader on the console, built on the stack that
+    # is measured working (TLS 1.3 plus certificate validation). Body on
+    # standard output, messages on standard error, so it composes in a shell.
+    add_executable(psxterm-fetch tools/fetch.c)
+    target_include_directories(psxterm-fetch PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/include")
+    target_link_libraries(psxterm-fetch PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libssl.a"
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libcrypto.a"
+      "${CMAKE_CURRENT_SOURCE_DIR}/dist/ps5-runtime/lib/libz.a")
+    set_target_properties(psxterm-fetch PROPERTIES SUFFIX ".elf")
   endif()
 
   # pslist: PS5 bring-up helper that lists processes through sysctl.

@@ -719,23 +719,57 @@ load_elf(pid_t pid, const uint8_t *elf, size_t elf_size)
         }
     }
 
-    for(int i = 0; i < ehdr->e_shnum && !error; i++) {
-        const Elf64_Rela *rela;
-        size_t count;
+    {
+        size_t relative = 0;
+        size_t abs64 = 0;
+        size_t other = 0;
 
-        if(shdr[i].sh_type != SHT_RELA) {
-            continue;
-        }
+        for(int i = 0; i < ehdr->e_shnum && !error; i++) {
+            const Elf64_Rela *rela;
+            size_t count;
 
-        rela = (const Elf64_Rela *)(elf + shdr[i].sh_offset);
-        count = shdr[i].sh_size / sizeof(Elf64_Rela);
+            if(shdr[i].sh_type != SHT_RELA) {
+                continue;
+            }
 
-        for(size_t j = 0; j < count; j++) {
-            if((rela[j].r_info & 0xffffffffl) == R_X86_64_RELATIVE) {
-                intptr_t *loc = (intptr_t *)(mirror + rela[j].r_offset);
-                *loc = base_addr + rela[j].r_addend;
+            rela = (const Elf64_Rela *)(elf + shdr[i].sh_offset);
+            count = shdr[i].sh_size / sizeof(Elf64_Rela);
+
+            for(size_t j = 0; j < count; j++) {
+                intptr_t *loc;
+                uint32_t type = (uint32_t)(rela[j].r_info & 0xffffffffl);
+
+                switch(type) {
+                case R_X86_64_RELATIVE:
+                    loc = (intptr_t *)(mirror + rela[j].r_offset);
+                    *loc = base_addr + rela[j].r_addend;
+                    relative++;
+                    break;
+
+                case R_X86_64_64:
+                    /*
+                     * A payload is a position-independent executable and has no
+                     * dynamic linker to consult, so an absolute quad reference
+                     * is resolved against the load address. curl was the one
+                     * payload in the bundle carrying these, and ignoring them
+                     * is what left it hanging before its own main.
+                     */
+                    loc = (intptr_t *)(mirror + rela[j].r_offset);
+                    *loc = base_addr + rela[j].r_addend;
+                    abs64++;
+                    break;
+
+                default:
+                    other++;
+                    break;
+                }
             }
         }
+
+        /* Report what was applied: an unhandled type is the first thing to
+         * suspect when a payload misbehaves here. */
+        PSX_LOGI("ps5: relocations: relative=%zu abs64=%zu other=%zu", relative,
+                 abs64, other);
     }
 
     if(pt_copyin(pid, mirror, base_addr, base_size)) {
