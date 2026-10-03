@@ -5,6 +5,11 @@ required by the development prompt. Status vocabulary: IMPLEMENTED, HOST
 TESTED, BUILDS FOR PS4, BUILDS FOR PS5, HARDWARE TEST REQUIRED, HARDWARE
 TESTED, UNSUPPORTED.
 
+The milestone evidence below records the initial development cycle. Later
+physical PS5 results are recorded in [HARDWARE_BRINGUP.md](HARDWARE_BRINGUP.md).
+Runtime startup corrections and their current evidence are recorded in
+[RUNTIME.md](RUNTIME.md).
+
 ## Milestone 0 - Repository audit
 
 The repository contained only `README.md`, `LICENSE` (GPLv3), `.gitignore`,
@@ -192,9 +197,10 @@ and redirection, and fuzzing targets for the new parsers.
 
 ## Known limitations
 
-* No console has run any PSXTerm code: every PS4/PS5 runtime path is
-  HARDWARE TEST REQUIRED, including the PTY probe, filesystem preparation and
-  the elfldr-based spawn.
+* PS5 bring-up is PARTIAL: hardware observations are recorded in
+  `docs/HARDWARE_BRINGUP.md`, including unresolved stdio limitations. PS4
+  hardware validation and the runtime startup changes in `docs/RUNTIME.md`
+  remain HARDWARE TEST REQUIRED.
 * External execution availability is gated at runtime on the SDK kernel
   helpers; when they are unusable the shell reports it instead of failing
   silently.

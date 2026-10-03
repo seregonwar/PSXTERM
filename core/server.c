@@ -1081,7 +1081,9 @@ main(int argc, char **argv)
         if(!psx_runtime_prepare()) {
             PSX_LOGW("runtime layout incomplete; external CLIs may misbehave");
         }
-        psx_runtime_manifest_write(NULL);
+        if(!psx_runtime_manifest_write(NULL)) {
+            PSX_LOGW("runtime manifest unavailable; package metadata missing");
+        }
     }
 
     if(doctor) {

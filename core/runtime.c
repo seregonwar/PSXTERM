@@ -3,11 +3,13 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 #include "psxterm/log.h"
 #include "psxterm/platform.h"
@@ -104,6 +106,30 @@ psx_runtime_manifest_path(void)
     return g_manifest;
 }
 
+static bool
+runtime_mkdir(const char *path)
+{
+    struct stat st;
+    int saved_errno;
+
+    if(mkdir(path, 0755) == 0) {
+        return true;
+    }
+    if(errno == EEXIST) {
+        if(stat(path, &st) == 0) {
+            if(S_ISDIR(st.st_mode)) {
+                return true;
+            }
+            errno = ENOTDIR;
+        }
+    }
+
+    saved_errno = errno;
+    PSX_LOGW("runtime: cannot create %s: %s", path, strerror(saved_errno));
+    errno = saved_errno;
+    return false;
+}
+
 bool
 psx_runtime_prepare(void)
 {
@@ -111,20 +137,16 @@ psx_runtime_prepare(void)
 
     /* The base first, then the root: mkdir does not create parents, and
      * everything else hangs off the root. */
-    if(mkdir(g_base, 0755) != 0 && errno != EEXIST) {
-        PSX_LOGW("runtime: cannot create %s: %s", g_base, strerror(errno));
+    if(!runtime_mkdir(g_base)) {
         return false;
     }
 
-    if(mkdir(g_root, 0755) != 0 && errno != EEXIST) {
-        PSX_LOGW("runtime: cannot create %s: %s", g_root, strerror(errno));
+    if(!runtime_mkdir(g_root)) {
         return false;
     }
 
     for(size_t i = 0; i < PSX_RUNTIME_DIR_COUNT; i++) {
-        if(mkdir(g_dirs[i], 0755) != 0 && errno != EEXIST) {
-            PSX_LOGW("runtime: cannot create %s: %s", g_dirs[i],
-                     strerror(errno));
+        if(!runtime_mkdir(g_dirs[i])) {
             return false;
         }
     }
@@ -136,22 +158,19 @@ psx_runtime_prepare(void)
 
         psx_path_join(nested, sizeof(nested),
                       psx_runtime_dir(PSX_RUNTIME_DIR_HOME), ".config");
-        if(mkdir(nested, 0755) != 0 && errno != EEXIST) {
-            PSX_LOGW("runtime: cannot create %s: %s", nested, strerror(errno));
+        if(!runtime_mkdir(nested)) {
             return false;
         }
 
         psx_path_join(nested, sizeof(nested),
                       psx_runtime_dir(PSX_RUNTIME_DIR_HOME), ".local");
-        if(mkdir(nested, 0755) != 0 && errno != EEXIST) {
-            PSX_LOGW("runtime: cannot create %s: %s", nested, strerror(errno));
+        if(!runtime_mkdir(nested)) {
             return false;
         }
 
         psx_path_join(nested, sizeof(nested),
                       psx_runtime_dir(PSX_RUNTIME_DIR_HOME), ".local/share");
-        if(mkdir(nested, 0755) != 0 && errno != EEXIST) {
-            PSX_LOGW("runtime: cannot create %s: %s", nested, strerror(errno));
+        if(!runtime_mkdir(nested)) {
             return false;
         }
     }
@@ -234,94 +253,136 @@ psx_runtime_env_is_contract(const char *key)
     return false;
 }
 
-static void
-env_add(char **out, size_t max, size_t *written, const char *key,
-        const char *value)
-{
-    size_t len;
-    char *entry;
-
-    if(*written >= max) {
-        return;
-    }
-
-    len = strlen(key) + 1 + strlen(value) + 1;
-    if(!(entry = malloc(len))) {
-        return;
-    }
-
-    snprintf(entry, len, "%s=%s", key, value);
-    out[*written] = entry;
-    (*written)++;
-}
-
 size_t
 psx_runtime_environment(char **out, size_t max)
 {
+    psx_runtime_env_t entries[16];
+    size_t count;
     size_t written = 0;
-    char path[PSX_PATH_MAX];
-
-    runtime_init();
 
     if(max == 0) {
         return 0;
     }
-
-    env_add(out, max, &written, "HOME",
-            psx_runtime_dir(PSX_RUNTIME_DIR_HOME));
-    env_add(out, max, &written, "TMPDIR",
-            psx_runtime_dir(PSX_RUNTIME_DIR_TMP));
-
-    psx_path_join(path, sizeof(path),
-                  psx_runtime_dir(PSX_RUNTIME_DIR_HOME), ".config");
-    env_add(out, max, &written, "XDG_CONFIG_HOME", path);
-
-    env_add(out, max, &written, "XDG_CACHE_HOME",
-            psx_runtime_dir(PSX_RUNTIME_DIR_CACHE));
-
-    psx_path_join(path, sizeof(path),
-                  psx_runtime_dir(PSX_RUNTIME_DIR_HOME), ".local/share");
-    env_add(out, max, &written, "XDG_DATA_HOME", path);
-
-    snprintf(path, sizeof(path), "%s:%s",
-             psx_runtime_dir(PSX_RUNTIME_DIR_BIN), psx_platform_bin_dir());
-    env_add(out, max, &written, "PATH", path);
-
-    env_add(out, max, &written, "SSL_CERT_FILE", g_ca_bundle);
-    env_add(out, max, &written, "CURL_CA_BUNDLE", g_ca_bundle);
-    env_add(out, max, &written, "TERM", "xterm-256color");
-
-    if(written < max) {
-        out[written] = NULL;
+    if(!out) {
+        errno = EINVAL;
+        return 0;
     }
 
+    count = psx_runtime_env_table(entries, sizeof(entries) / sizeof(entries[0]));
+    while(written < count && written + 1 < max) {
+        const char *key = entries[written].key;
+        const char *value = entries[written].value;
+        size_t len = strlen(key) + 1 + strlen(value) + 1;
+        char *entry = malloc(len);
+
+        if(!entry) {
+            break;
+        }
+        snprintf(entry, len, "%s=%s", key, value);
+        out[written++] = entry;
+    }
+    out[written] = NULL;
+
     return written;
+}
+
+static void
+manifest_json_string(FILE *file, const char *value)
+{
+    const unsigned char *cursor = (const unsigned char *)value;
+
+    fputc('"', file);
+    for(; *cursor; cursor++) {
+        if(*cursor == '"' || *cursor == '\\') {
+            fputc('\\', file);
+            fputc(*cursor, file);
+        } else if(*cursor < 0x20) {
+            fprintf(file, "\\u%04x", (unsigned int)*cursor);
+        } else {
+            fputc(*cursor, file);
+        }
+    }
+    fputc('"', file);
 }
 
 bool
 psx_runtime_manifest_write(const char *extra_packages_json)
 {
     FILE *file;
+    int fd;
+    int saved_errno = 0;
+    bool initialize = !extra_packages_json || !*extra_packages_json;
+    char temporary[PSX_PATH_MAX];
+    const char *path = g_manifest;
 
     runtime_init();
 
-    if(!(file = fopen(g_manifest, "w"))) {
+    if(initialize) {
+        fd = open(g_manifest, O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if(fd < 0 && errno == EEXIST) {
+            struct stat st;
+
+            if(stat(g_manifest, &st) == 0) {
+                if(S_ISREG(st.st_mode)) {
+                    return true;
+                }
+                errno = S_ISDIR(st.st_mode) ? EISDIR : EINVAL;
+            }
+        }
+    } else {
+        if(psx_path_join(temporary, sizeof(temporary), g_root,
+                         ".runtime.json-XXXXXX") < 0) {
+            return false;
+        }
+        path = temporary;
+        fd = mkstemp(temporary);
+    }
+    if(fd < 0) {
+        saved_errno = errno;
         PSX_LOGW("runtime: cannot write %s: %s", g_manifest,
-                 strerror(errno));
+                 strerror(saved_errno));
+        errno = saved_errno;
         return false;
     }
 
+    if(!(file = fdopen(fd, "w"))) {
+        saved_errno = errno;
+        close(fd);
+        unlink(path);
+        errno = saved_errno;
+        return false;
+    }
+
+    errno = 0;
     fprintf(file, "{\n");
     fprintf(file, "  \"version\": 1,\n");
-    fprintf(file, "  \"platform\": \"%s\",\n", psx_platform_id());
+    fprintf(file, "  \"platform\": ");
+    manifest_json_string(file, psx_platform_id());
+    fprintf(file, ",\n");
     fprintf(file, "  \"arch\": \"x86_64\",\n");
-    fprintf(file, "  \"root\": \"%s\",\n", g_root);
+    fprintf(file, "  \"root\": ");
+    manifest_json_string(file, g_root);
+    fprintf(file, ",\n");
     fprintf(file, "  \"packages\": %s\n",
-            extra_packages_json && *extra_packages_json ? extra_packages_json
-                                                        : "{}");
+            initialize ? "{}" : extra_packages_json);
     fprintf(file, "}\n");
 
-    fclose(file);
+    if(ferror(file) || fflush(file) != 0 || fsync(fd) != 0) {
+        saved_errno = errno ? errno : EIO;
+    }
+    if(fclose(file) != 0 && !saved_errno) {
+        saved_errno = errno ? errno : EIO;
+    }
+    if(!saved_errno && !initialize && rename(temporary, g_manifest) != 0) {
+        saved_errno = errno;
+    }
+    if(saved_errno) {
+        unlink(path);
+        PSX_LOGW("runtime: cannot write %s: %s", g_manifest,
+                 strerror(saved_errno));
+        errno = saved_errno;
+        return false;
+    }
 
     return true;
 }

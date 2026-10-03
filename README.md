@@ -48,6 +48,7 @@ Terminology follows the project's strict rules:
 | Backpressure bounds (input + output queues) | IMPLEMENTED, HOST TESTED |
 | Persistent sessions (detach / attach / resume, bounded scrollback) | IMPLEMENTED, HOST TESTED |
 | File transfer (push / pull / install, atomic uploads) | IMPLEMENTED, HOST TESTED |
+| Runtime layout, environment and package metadata | IMPLEMENTED, HOST TESTED; updated runtime sources compile for PS4/PS5, HARDWARE TEST REQUIRED |
 | Challenge-response authentication | NOT IMPLEMENTED (shared token only) |
 | psh history / completion / cursor editing | NOT IMPLEMENTED |
 | psh pipelines and redirection | NOT IMPLEMENTED |
@@ -59,8 +60,10 @@ Terminology follows the project's strict rules:
 
 The PS4/PS5 builds produce payload ELFs with the official
 [ps5-payload-dev/sdk](https://github.com/ps5-payload-dev/sdk) and
-[ps4-payload-dev/sdk](https://github.com/ps4-payload-dev/sdk) SDKs, but no
-console has executed them yet. Do not read "builds" as "works".
+[ps4-payload-dev/sdk](https://github.com/ps4-payload-dev/sdk) SDKs. PS5 bring-up
+has reached physical hardware, with partial results recorded in
+[docs/HARDWARE_BRINGUP.md](docs/HARDWARE_BRINGUP.md); PS4 hardware validation
+remains pending. Do not read "builds" as "works".
 
 ## Layout
 
@@ -147,6 +150,11 @@ Anything else is resolved through `PATH` (default `/data/psxterm/bin`, with an
 implicit `.elf` suffix on consoles) and executed as an external ELF on the
 session tty.
 
+External commands receive the runtime home, temporary and XDG directories,
+certificate paths and a runtime-first `PATH`. See
+[docs/RUNTIME.md](docs/RUNTIME.md) for the layout, metadata lifecycle and
+validation status.
+
 ### TTY capability probe
 
 ```console
@@ -176,15 +184,16 @@ expose the daemon to untrusted networks while authentication is disabled.
 
 ## Testing
 
-* 8 host unit suites via CTest (protocol, parser, env, registry, session,
-  tty, shell, diagnostics).
-* 40 host integration tests driving a real daemon with an independent Python
+* 9 host unit suites via CTest (protocol, parser, env, registry, session,
+  tty, shell, diagnostics, runtime).
+* 42 host integration tests driving a real daemon with an independent Python
   implementation of PTTY/1, covering malformed input, authentication, session
   limits, resize, signals, multi-session isolation, timeouts, the doctor
   command (human, JSON, busy session, client binary), capabilities,
   backpressure floods with bounded-RSS assertions, detach/attach/resume with
   scrollback truncation, file transfer (roundtrip, atomicity, path safety,
-  client binary) and a disconnect/fd-leak stress loop.
+  client binary), runtime metadata JSON escaping and restart preservation,
+  manifest failure reporting and a disconnect/fd-leak stress loop.
 * `cli_test` is the controlled external-execution target (argv, environment,
   `isatty`, window size, stdin, stdout/stderr, exit code 7).
 

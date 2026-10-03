@@ -51,9 +51,9 @@ bool psx_runtime_prepare(void);
 /*
  * Environment every externally spawned CLI process must receive, as
  * "KEY=VALUE" strings: HOME, TMPDIR, the XDG locations, PATH, the TLS bundle
- * variables and TERM. Writes up to max entries plus a NULL terminator into
- * out and returns the number of entries written. The caller owns the
- * strings.
+ * variables and TERM. max is the total capacity of out, including the NULL
+ * terminator: writes at most max - 1 entries and returns their count. For
+ * max > 0, out is always terminated. The caller owns the strings.
  */
 size_t psx_runtime_environment(char **out, size_t max);
 
@@ -73,7 +73,10 @@ size_t psx_runtime_env_table(psx_runtime_env_t *out, size_t max);
 bool psx_runtime_env_is_contract(const char *key);
 
 /*
- * Write the runtime manifest (runtime.json) describing this layout. Metadata
- * only: this is not a package manager.
+ * Write the runtime manifest (runtime.json) describing this layout. NULL or
+ * an empty string initializes a missing manifest and preserves an existing
+ * regular file. A nonempty, valid JSON object replaces the package metadata
+ * through a temporary file and atomic rename. Returns false and sets errno
+ * on write/flush/close/rename failure. Metadata only: not a package manager.
  */
 bool psx_runtime_manifest_write(const char *extra_packages_json);

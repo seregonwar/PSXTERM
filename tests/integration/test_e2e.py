@@ -17,6 +17,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 
 MAGIC = 0x59545450  # wire bytes 'P','T','T','Y'
@@ -75,19 +76,20 @@ class ProtocolError(Exception):
 
 
 class Daemon:
-    def __init__(self, *args, wait=True):
+    def __init__(self, *args, wait=True, env=None):
         self.port = free_port()
         self.log_path = os.path.join(
             os.environ.get("PSXTERM_SCRATCH", "/tmp"),
             "psxtermd-test-%d.log" % os.getpid())
         self.log_file = open(self.log_path, "wb")
-        env = dict(os.environ)
-        env["PSXTERM_PID_FILE"] = os.path.join(
+        process_env = dict(os.environ)
+        process_env.update(env or {})
+        process_env["PSXTERM_PID_FILE"] = os.path.join(
             os.environ.get("PSXTERM_SCRATCH", "/tmp"),
             "psxtermd-test-%d.pid" % self.port)
         self.proc = subprocess.Popen(
             [os.path.join(BUILD, "psxtermd"), "-p", str(self.port)] + list(args),
-            stdout=subprocess.DEVNULL, stderr=self.log_file, env=env)
+            stdout=subprocess.DEVNULL, stderr=self.log_file, env=process_env)
         if wait:
             self.wait_ready()
 
@@ -1331,7 +1333,51 @@ def test_disconnect_stress_and_fd_leak():
         client.close()
 
 
+def test_runtime_manifest_survives_restart():
+    # Quotes, backslashes and a control character require real JSON escaping.
+    with tempfile.TemporaryDirectory(prefix='psxterm-"\\\n-') as base:
+        env = {"PSXTERM_RUNTIME_BASE": base}
+        root = os.path.join(base, "runtime")
+        manifest = os.path.join(root, "runtime.json")
+        with Daemon(env=env):
+            with open(manifest, "r") as handle:
+                data = json.load(handle)
+            check(data["root"] == root, "manifest root did not roundtrip")
+            check(data["packages"] == {}, "default manifest contains packages")
+
+            # Simulate a bundle installer, including an unknown metadata field.
+            data["packages"] = {"curl": "test-version"}
+            data["bundle_revision"] = "preserve-me"
+            installed = json.dumps(data, indent=2).encode()
+            with open(manifest, "wb") as handle:
+                handle.write(installed)
+
+        with Daemon(env=env):
+            with open(manifest, "rb") as handle:
+                check(handle.read() == installed,
+                      "daemon restart changed installed runtime metadata")
+
+
+def test_runtime_manifest_failure_is_reported():
+    with tempfile.TemporaryDirectory(prefix="psxterm-test-") as base:
+        manifest = os.path.join(base, "runtime", "runtime.json")
+        os.makedirs(manifest)
+        with Daemon(env={"PSXTERM_RUNTIME_BASE": base}) as daemon:
+            check(os.path.isdir(manifest), "startup replaced manifest directory")
+            check("runtime manifest unavailable" in daemon.read_log(),
+                  "manifest write failure was not reported")
+            client = Client(daemon)
+            try:
+                output, code, _ = client.execute("pwd")
+                check(code == 0 and output,
+                      "manifest failure prevented shell operation")
+            finally:
+                client.close()
+
+
 TESTS = [
+    test_runtime_manifest_survives_restart,
+    test_runtime_manifest_failure_is_reported,
     test_handshake_and_prompt,
     test_builtins_and_exit_status,
     test_ping_pong,
