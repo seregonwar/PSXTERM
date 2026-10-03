@@ -1,0 +1,168 @@
+name: Nightly
+
+on:
+  schedule:
+    # One entry is selected for 22:00 Europe/Rome, including daylight saving.
+    - cron: "0 20 * * *"
+    - cron: "0 21 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-main
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Resolve main snapshot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      should_run: ${{ steps.identity.outputs.should_run }}
+      sha: ${{ steps.identity.outputs.sha }}
+      tag: ${{ steps.identity.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Resolve schedule and immutable identity
+        id: identity
+        shell: bash
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          python tools/nightly.py identity --sha "$sha" --run-id "$GITHUB_RUN_ID" \
+            --schedule "$SCHEDULE" --existing-tags "$(git tag --points-at "$sha")" >> "$GITHUB_OUTPUT"
+
+  desktop:
+    name: Client and host (${{ matrix.target }})
+    needs: preflight
+    if: needs.preflight.outputs.should_run == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: linux-x86_64
+          - os: windows-2022
+            target: windows-x86_64
+          - os: macos-15
+            target: macos-arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+      - name: Check client resources and style
+        run: |
+          python tools/check_locales.py
+          cargo fmt --manifest-path client/tui/Cargo.toml -- --check
+          cargo clippy --locked --manifest-path client/tui/Cargo.toml --all-targets -- -D warnings
+      - name: Test and build client
+        run: |
+          cargo test --locked --manifest-path client/tui/Cargo.toml
+          cargo build --release --locked --manifest-path client/tui/Cargo.toml
+      - name: Build and test host tools
+        if: runner.os != 'Windows'
+        run: |
+          cmake -S . -B build-nightly-host -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-nightly-host --parallel
+          ctest --test-dir build-nightly-host --output-on-failure
+      - name: Real terminal and host integration checks
+        if: runner.os == 'Linux'
+        run: |
+          python tests/integration/test_e2e.py --build build-nightly-host
+          cargo build --release --locked --manifest-path client/tui/Cargo.toml --example tty_decode
+          python client/tui/tests/tty_smoke.py --output build-nightly-tty
+      - name: Package binaries and provenance
+        env:
+          NIGHTLY_TAG: ${{ needs.preflight.outputs.tag }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.sha }}
+          PACKAGE_TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/nightly.py package --target "$PACKAGE_TARGET" --tag "$NIGHTLY_TAG" --sha "$SOURCE_SHA"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-package-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS-*.txt
+          if-no-files-found: error
+          retention-days: 14
+      - name: Save terminal diagnostics
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-terminal-diagnostics
+          path: build-nightly-tty/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish:
+    name: Publish immutable prerelease
+    needs: [preflight, desktop]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nightly-package-*
+          path: dist
+          merge-multiple: true
+      - name: Verify all packages
+        env:
+          NIGHTLY_TAG: ${{ needs.preflight.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          for target in linux-x86_64 windows-x86_64 macos-arm64; do
+            sha256sum -c "SHA256SUMS-$target.txt"
+            extension=tar.gz
+            if [ "$target" = windows-x86_64 ]; then extension=zip; fi
+            test -f "psxterm-$NIGHTLY_TAG-$target.$extension"
+          done
+          cat SHA256SUMS-*.txt | sort -k2 > SHA256SUMS.txt
+      - name: Publish snapshot without replacing stable Latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NIGHTLY_TAG: ${{ needs.preflight.outputs.tag }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$NIGHTLY_TAG" >/dev/null 2>&1; then
+            echo "Nightly already published; its assets will not be replaced."
+            exit 0
+          fi
+          printf '%s\n\n%s\n\n%s\n\n%s\n' \
+            'Development snapshot of the PSXTerm workspace client and host tools.' \
+            "Commit: $SOURCE_SHA" \
+            "Build: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            'Windows includes the workspace client. Linux and macOS also include host daemon/CLI tools. Hardware execution is not validated by this workflow. Check SHA256SUMS.txt before use.' > nightly-notes.md
+          gh release create "$NIGHTLY_TAG" dist/*.tar.gz dist/*.zip dist/SHA256SUMS.txt \
+            --target "$SOURCE_SHA" --title "PSXTerm $NIGHTLY_TAG" \
+            --prerelease --latest=false --notes-file nightly-notes.md

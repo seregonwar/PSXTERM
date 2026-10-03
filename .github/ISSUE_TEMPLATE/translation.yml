@@ -1,0 +1,53 @@
+name: Translation or localization
+description: Report missing translations, incorrect wording, or text that does not fit.
+title: "[i18n]: "
+labels: ["localization", "needs-triage"]
+body:
+  - type: dropdown
+    id: language
+    attributes:
+      label: Language
+      options:
+        - English (en)
+        - Italian (it)
+        - New language
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: Release tag, nightly tag, or commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: Localization issue
+      description: Include the screen or CLI command, current wording, and suggested wording.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Terminal and display
+      description: Useful for clipped text, wrapping, or missing glyphs.
+      placeholder: |
+        OS / terminal application:
+        Columns × rows:
+        Font / scaling:
+        Selected language:
+  - type: textarea
+    id: keys
+    attributes:
+      label: Affected keys or screenshots
+      placeholder: |
+        client/tui/locales/it.json
+        ui.choose
+        Screenshot with tokens and private paths removed
+  - type: textarea
+    id: verification
+    attributes:
+      label: Checks already tried
+      description: A report does not require a development toolchain. List checks only if you ran them.
+      placeholder: Language switch, window resize, CLI output, or python3 tools/check_locales.py

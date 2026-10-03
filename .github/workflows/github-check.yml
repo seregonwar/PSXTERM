@@ -1,0 +1,35 @@
+name: GitHub Configuration
+
+on:
+  pull_request:
+    paths: [".github/**", "tools/nightly.py", "tools/check_locales.py", "tests/test_github_tools.py"]
+  push:
+    branches: [main]
+    paths: [".github/**", "tools/nightly.py", "tools/check_locales.py", "tests/test_github_tools.py"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-config-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate workflow syntax and expressions
+        uses: docker://rhysd/actionlint:1.7.11
+        with:
+          args: -color -shellcheck= -pyflakes=
+      - name: Test nightly identity, archives, and locale validation
+        run: python -m unittest discover -s tests -p test_github_tools.py
+      - run: python tools/check_locales.py

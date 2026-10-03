@@ -1,0 +1,29 @@
+name: Locale Check
+
+on:
+  pull_request:
+    paths: ["client/tui/locales/**", "tools/check_locales.py", ".github/workflows/locale-check.yml"]
+  push:
+    branches: [main]
+    paths: ["client/tui/locales/**", "tools/check_locales.py", ".github/workflows/locale-check.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: locales-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  locales:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python tools/check_locales.py

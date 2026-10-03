@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Feature requests should describe a legitimate homebrew, debugging, research, or offline development workflow. PSXTerm is explicitly not an SSH server, not a GUI application, and does not port large external runtimes.
+        Describe the workflow you want to improve and the expected user-facing behavior. Include a concrete example when possible.
 
   - type: dropdown
     id: area
@@ -21,6 +21,9 @@ body:
         - PS5 platform
         - PS4 platform
         - Host client
+        - Ratatui workspace / console profiles / terminal tabs
+        - Flash actions / CLI usability
+        - Localization / accessibility
         - Build / CI / release
         - Documentation
     validations:

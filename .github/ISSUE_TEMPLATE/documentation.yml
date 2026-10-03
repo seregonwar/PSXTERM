@@ -12,6 +12,9 @@ body:
         - README - build instructions
         - README - running and client usage
         - docs/IMPLEMENTATION.md
+        - docs/CLIENT_TUI.md
+        - docs/CI.md / nightly downloads
+        - CONTRIBUTING.md
         - Protocol reference (include/psxterm/protocol.h)
         - psh builtins
         - PS4 / PS5 platform notes

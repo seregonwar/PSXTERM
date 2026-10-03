@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Use this form for console hangs, hard crashes, kernel panics, payload exits, or terminal sessions that make the console unstable. PSXTerm's PS4/PS5 runtime paths are experimental and not yet hardware validated, so this feedback is essential.
+        Use this form for console hangs, hard crashes, kernel panics, payload exits, or terminal sessions that make the console unstable. Hardware validation varies by platform and feature; include the exact build and firmware. Remove access tokens, resume tokens, and private paths from logs.
 
   - type: dropdown
     id: platform

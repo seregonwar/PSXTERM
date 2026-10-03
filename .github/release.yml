@@ -1,0 +1,16 @@
+changelog:
+  exclude:
+    labels: ["skip-changelog"]
+  categories:
+    - title: Fixes
+      labels: ["bug", "crash"]
+    - title: Client and usability
+      labels: ["enhancement", "client", "ux"]
+    - title: Languages
+      labels: ["localization"]
+    - title: Documentation
+      labels: ["documentation"]
+    - title: Dependencies
+      labels: ["dependencies"]
+    - title: Other changes
+      labels: ["*"]

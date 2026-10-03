@@ -213,6 +213,13 @@ expose the daemon to untrusted networks while authentication is disabled.
 * `cli_test` is the controlled external-execution target (argv, environment,
   `isatty`, window size, stdin, stdout/stderr, exit code 7).
 
+## Contributing and development builds
+
+Use the [contribution guide](CONTRIBUTING.md) for client/host checks and translation
+changes. Issue forms cover bugs, console crashes, features, documentation, and
+localization. See [CI and nightly downloads](docs/CI.md) for desktop development
+builds, supported platforms, commit metadata, and SHA-256 checksums.
+
 ## License
 
 GPLv3. The PS4/PS5 process backends follow the minimal concepts of the

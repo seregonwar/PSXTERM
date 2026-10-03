@@ -11,6 +11,8 @@
 - [ ] PS5 platform
 - [ ] PS4 platform
 - [ ] Host client
+- [ ] Ratatui workspace / flash CLI
+- [ ] Localization / terminal layout / accessibility
 - [ ] External execution
 - [ ] Tests
 - [ ] Build / CI / release
@@ -29,6 +31,11 @@
 - [ ] `cmake --build build-host -j`
 - [ ] `ctest --test-dir build-host --output-on-failure`
 - [ ] `python3 tests/integration/test_e2e.py --build build-host`
+- [ ] `cargo fmt --manifest-path client/tui/Cargo.toml -- --check`
+- [ ] `cargo clippy --locked --manifest-path client/tui/Cargo.toml --all-targets -- -D warnings`
+- [ ] `cargo test --locked --manifest-path client/tui/Cargo.toml`
+- [ ] `python3 tools/check_locales.py`
+- [ ] Client layout checked at 55×18, 80×24, and 140×44 in English and Italian
 - [ ] PS5 payload builds with `prospero.cmake`
 - [ ] PS4 payload builds with `orbis.cmake`
 - [ ] PS5 manual check
@@ -37,7 +44,8 @@
 
 ## Notes for reviewers
 
-- 
+- Screenshots or snapshot artifacts for visible UI changes:
+- Validation not run, and why:
 
 ## Scope confirmation
 

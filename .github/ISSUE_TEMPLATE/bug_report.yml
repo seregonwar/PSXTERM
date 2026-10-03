@@ -15,6 +15,8 @@ body:
       description: Which area is affected?
       options:
         - Client - psxterm
+        - Workspace client - psxterm-tui / Ratatui
+        - Client localization / display layout
         - Daemon - psxtermd
         - Protocol - PTTY/1
         - Shell - psh
@@ -51,6 +53,9 @@ body:
         Payload SDK / loader:
         TTY backend (auto / pty / pipe):
         Build type (host / PS4 payload / PS5 payload):
+        Client / terminal application:
+        Terminal size (columns × rows):
+        Client language (en / it):
     validations:
       required: true
 
@@ -88,7 +93,7 @@ body:
     id: logs
     attributes:
       label: Logs and diagnostics
-      description: Paste `psxtermd -v` output, client output, `psxterm-ttyprobe` results, ctest/CI links, or core dumps.
+      description: Paste daemon/client output, TTY probe results, CI links, or screenshots. Remove access tokens, resume tokens, and private paths.
       render: text
 
   - type: textarea

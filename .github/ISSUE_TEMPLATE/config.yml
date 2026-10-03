@@ -1,5 +1,11 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Workspace client and flash commands
+    url: https://github.com/seregonwar/PSXTERM/blob/main/docs/CLIENT_TUI.md
+    about: Console profiles, terminal tabs, language selection, and connection troubleshooting.
+  - name: CI and nightly downloads
+    url: https://github.com/seregonwar/PSXTERM/blob/main/docs/CI.md
+    about: Download development builds and include their exact commit when reporting a regression.
   - name: Security and exposure policy
     url: https://github.com/seregonwar/PSXTERM#security
     about: Review the authentication and network exposure rules before opening a request.
