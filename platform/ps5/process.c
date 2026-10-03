@@ -856,33 +856,43 @@ build_payload_args(pid_t pid, const psx_spawn_options_t *options)
      */
     if(options->relay_out && options->relay_in) {
         /*
-         * The daemon owns the pipe and imports both ends, so it can read what
-         * the payload's runtime writes and feed what it reads. Importing a
-         * pipe's descriptors keeps them pipes, which is what the safety rule
-         * requires.
+         * Relay experiment: the daemon creates the pair and imports both ends,
+         * so it owns the counterparts and can see which channel the payload
+         * runtime actually uses for its libc stdout. Sockets are the shape the
+         * reference relays through, and this kernel imports socket descriptors
+         * cleanly.
          */
-        int daemon_pipe[2] = {-1, -1};
+        int daemon_pair[2] = {-1, -1};
 
-        if(pipe(daemon_pipe) != 0) {
-            PSX_LOGE("ps5: args: cannot create the relay pipe");
+        if(psx_socket_pair(daemon_pair) != 0) {
+            PSX_LOGE("ps5: args: cannot create the relay pair");
             return 0;
         }
 
-        pipe_fds[0] = (int)pt_rdup(pid, getpid(), daemon_pipe[0]);
-        pipe_fds[1] = (int)pt_rdup(pid, getpid(), daemon_pipe[1]);
+        master_sock = (int)pt_rdup(pid, getpid(), daemon_pair[0]);
+        victim_sock = (int)pt_rdup(pid, getpid(), daemon_pair[1]);
 
-        if(pipe_fds[0] < 0 || pipe_fds[1] < 0) {
-            PSX_LOGE("ps5: args: cannot import the relay pipe");
-            close(daemon_pipe[0]);
-            close(daemon_pipe[1]);
+        if(master_sock < 0 || victim_sock < 0) {
+            PSX_LOGE("ps5: args: cannot import the relay pair");
+            close(daemon_pair[0]);
+            close(daemon_pair[1]);
             return 0;
         }
 
-        *options->relay_out = daemon_pipe[0];
-        *options->relay_in = daemon_pipe[1];
+        /*
+         * Both directions are watched, because which end the runtime writes
+         * to is exactly what is being established: relay_out reads, relay_in
+         * writes and is watched as well.
+         */
+        *options->relay_out = daemon_pair[1];
+        *options->relay_in = daemon_pair[0];
 
-        PSX_LOGI("ps5: args: relay pipe %d,%d -> victim %d,%d", daemon_pipe[0],
-                 daemon_pipe[1], pipe_fds[0], pipe_fds[1]);
+        /* The session drains both without blocking. */
+        psx_set_nonblocking(daemon_pair[0], true);
+        psx_set_nonblocking(daemon_pair[1], true);
+
+        PSX_LOGI("ps5: args: relay pair %d,%d -> victim %d,%d", daemon_pair[0],
+                 daemon_pair[1], master_sock, victim_sock);
     } else {
         intptr_t victim_fds = buf + 0x400;
 

@@ -759,17 +759,17 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
     options.envp = envp;
 
     /*
-     * Relay, off by default.
+     * Relay, off: both candidates measured and falsified.
      *
-     * The daemon-owned pipe is built and imported correctly (the log shows
-     * "relay pipe 34,35 -> victim 5,6"), but with it enabled the session then
-     * dies with "relay error", and - the important part - the payload's libc
-     * stdout still does not appear. That means the runtime does not write its
-     * stdout through rwpipe either, so the next thing to establish is which
-     * handle it does use (the UDP pair from kernel_overlap_sockets is the
-     * remaining candidate, and the reference's own servers relay through
-     * sockets). Until then the descriptors stay -1 so the working path is
-     * untouched.
+     * Hypothesis one was that the runtime writes its libc stdout to rwpipe,
+     * hypothesis two that it writes to the overlapped socket pair. With a
+     * daemon-owned pipe imported for rwpipe the session reported "relay error"
+     * and the output still did not arrive; with a daemon-owned socket pair
+     * imported for rwpair, even the payload's raw descriptor writes stopped
+     * appearing, so substituting that pair breaks the runtime's startup as
+     * well. The working configuration - the reference's own pair plus a pipe
+     * created inside the victim - is what stays until the channel is
+     * identified, and the instrumented loader makes that next attempt cheap.
      */
     (void)options.relay_out;
     (void)options.relay_in;
@@ -1941,33 +1941,42 @@ int
 psx_session_on_relay_readable(psx_session_t *session)
 {
     uint8_t buffer[4096];
+    int *fds[2] = {&session->proc.relay_out, &session->proc.relay_in};
 
-    if(session->proc.relay_out < 0) {
-        return 0;
+    /*
+     * Both ends are drained: the pair belongs to the daemon, and which side
+     * the payload runtime writes to is exactly what this is establishing. The
+     * bytes go out as ordinary STDOUT, next to whatever the payload wrote to
+     * its descriptors directly.
+     */
+    for(size_t i = 0; i < 2; i++) {
+        while(*fds[i] >= 0) {
+            ssize_t n = read(*fds[i], buffer, sizeof(buffer));
+
+            if(n < 0) {
+                if(errno == EINTR) {
+                    continue;
+                }
+                if(errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break;
+                }
+                PSX_LOGW("session %u: relay read: %s", session->id,
+                         strerror(errno));
+                return -1;
+            }
+            if(n == 0) {
+                close(*fds[i]);
+                *fds[i] = -1;
+                break;
+            }
+            if(psx_session_emit(session, PTTY_MSG_STDOUT, buffer,
+                                (size_t)n) < 0) {
+                return -1;
+            }
+        }
     }
 
-    for(;;) {
-        ssize_t n = read(session->proc.relay_out, buffer, sizeof(buffer));
-
-        if(n < 0) {
-            if(errno == EINTR) {
-                continue;
-            }
-            if(errno == EAGAIN || errno == EWOULDBLOCK) {
-                return 0;
-            }
-            PSX_LOGW("session %u: relay read: %s", session->id, strerror(errno));
-            return -1;
-        }
-        if(n == 0) {
-            close(session->proc.relay_out);
-            session->proc.relay_out = -1;
-            return 0;
-        }
-        if(psx_session_emit(session, PTTY_MSG_STDOUT, buffer, (size_t)n) < 0) {
-            return -1;
-        }
-    }
+    return 0;
 }
 
 int
