@@ -11,9 +11,14 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, Mou
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use std::{collections::HashMap, path::PathBuf};
 
-/// A screen-space text selection, in (column, row) cells.
+/// A text selection anchored to the content of one terminal pane.
+///
+/// The coordinates are columns and content lines, where a line counts from the
+/// oldest line still in the scrollback, not screen cells: that is what keeps a
+/// selection on the text it was made on when the view scrolls underneath it.
 #[derive(Clone, Copy)]
 pub struct Selection {
+    pub pane: u64,
     pub start: (u16, u16),
     pub end: (u16, u16),
 }
@@ -21,15 +26,15 @@ pub struct Selection {
 impl Selection {
     /// Inclusive bounds, normalised so the first pair is the top-left one.
     pub fn bounds(&self) -> ((u16, u16), (u16, u16)) {
-        let (mut x0, mut y0) = self.start;
-        let (mut x1, mut y1) = self.end;
+        let (mut c0, mut l0) = self.start;
+        let (mut c1, mut l1) = self.end;
 
-        if (y0, x0) > (y1, x1) {
-            std::mem::swap(&mut x0, &mut x1);
-            std::mem::swap(&mut y0, &mut y1);
+        if (l0, c0) > (l1, c1) {
+            std::mem::swap(&mut c0, &mut c1);
+            std::mem::swap(&mut l0, &mut l1);
         }
 
-        ((x0, y0), (x1, y1))
+        ((c0, l0), (c1, l1))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -91,12 +96,9 @@ pub struct App {
     pub demo: bool,
     pub hits: Vec<(Rect, Hit)>,
     pub text_scroll_limit: u16,
-    /// Screen-space text selection and the size it was made on.
+    /// Text selection, anchored to the content of the pane it started in.
     pub sel: Option<Selection>,
     pub screen: (u16, u16),
-    /// When the selection started over a terminal pane, the rectangle it is
-    /// confined to: dragging must not pull in the sidebar or the buttons.
-    pub sel_bounds: Option<Rect>,
     retiring: Vec<Connection>,
     next_pane: u64,
 }
@@ -121,38 +123,90 @@ impl App {
             text_scroll_limit: 0,
             sel: None,
             screen: (0, 0),
-            sel_bounds: None,
             retiring: vec![],
             next_pane: 1,
         }
     }
 
-    /// Keep a point inside the rectangle a selection is confined to.
-    fn clamp_to_selection(&self, point: (u16, u16)) -> (u16, u16) {
-        match self.sel_bounds {
-            Some(rect) if rect.width > 0 && rect.height > 0 => {
-                let x = point.0.clamp(rect.x, rect.x + rect.width - 1);
-                let y = point.1.clamp(rect.y, rect.y + rect.height - 1);
+    /// Rectangle of a terminal pane, from the hit boxes the last draw left.
+    pub(crate) fn pane_rect(&self, pane: u64) -> Option<Rect> {
+        self.hits.iter().rev().find_map(|(rect, hit)| match hit {
+            Hit::Pane(id) if *id == pane => Some(*rect),
+            _ => None,
+        })
+    }
 
-                (x, y)
-            }
-            _ => point,
+    fn pane_scrollback(&self, pane: u64) -> u16 {
+        self.panes
+            .iter()
+            .find(|p| p.id == pane)
+            .map(|p| p.parser.screen().scrollback() as u16)
+            .unwrap_or(0)
+    }
+
+    fn set_pane_scrollback(&mut self, pane: u64, offset: u16) {
+        if let Some(p) = self.panes.iter_mut().find(|p| p.id == pane) {
+            p.parser.screen_mut().set_scrollback(offset as usize);
         }
     }
 
-    /// Copy the current selection, or the whole visible workspace when there
-    /// is none, into the clipboard of the terminal displaying this client.
+    /// Content line shown at a screen row of that pane.
+    ///
+    /// The number counts from the live bottom of the view: scrollback plus the
+    /// rows left below the given row. Anchored that way it does not change when
+    /// the view scrolls, which is what keeps a selection on its text.
+    fn content_line(&self, pane: u64, rect: Rect, row: u16) -> u16 {
+        let below = rect
+            .height
+            .saturating_sub(1)
+            .saturating_sub(row.saturating_sub(rect.y));
+
+        self.pane_scrollback(pane).saturating_add(below)
+    }
+
+    /// Screen row where a content line is currently visible, if it is.
+    pub(crate) fn screen_row_for_line(
+        &self,
+        pane: u64,
+        rect: Rect,
+        line: u16,
+    ) -> Option<u16> {
+        let above = line.checked_sub(self.pane_scrollback(pane))?;
+
+        (above < rect.height).then_some(rect.y + (rect.height - 1 - above))
+    }
+
+    /// Scrollback offset that puts a content line at the top of the pane.
+    fn scrollback_for_line(&self, rect: Rect, line: u16) -> u16 {
+        line.saturating_sub(rect.height.saturating_sub(1))
+    }
+
+    /// Copy the current selection, or the visible content of the active pane
+    /// when there is none, into the clipboard of the terminal displaying this
+    /// client.
     pub fn copy_selection(&mut self) {
         let sel = match self.sel {
             Some(sel) if !sel.is_empty() => sel,
             _ => {
-                let (cols, rows) = self.screen;
-                if cols == 0 || rows == 0 {
+                /* Nothing selected: the visible content of the active pane is
+                 * the natural thing to copy. */
+                let Some(pane) = self.active else {
+                    return;
+                };
+                let Some(rect) = self.pane_rect(pane) else {
+                    return;
+                };
+                if rect.width == 0 || rect.height == 0 {
                     return;
                 }
+
                 Selection {
-                    start: (0, 0),
-                    end: (cols.saturating_sub(1), rows.saturating_sub(1)),
+                    pane,
+                    start: (rect.x, self.content_line(pane, rect, rect.y)),
+                    end: (
+                        rect.x + rect.width - 1,
+                        self.content_line(pane, rect, rect.y + rect.height - 1),
+                    ),
                 }
             }
         };
@@ -185,36 +239,61 @@ impl App {
         self.sel = None;
     }
 
-    /// The text under the selection, exactly as it is displayed.
+    /// The text under the selection.
     ///
-    /// The workspace is rendered into an off-screen buffer first, so wrapped
-    /// lines and wide glyphs come out the way the user sees them instead of
-    /// the way the raw stream looked.
+    /// Lines come from the pane's own buffer, so what is copied is the text as
+    /// the terminal holds it - including lines the view has scrolled past, for
+    /// which the pane is scrolled temporarily and then restored.
     fn selection_text(&mut self, sel: Selection) -> Option<String> {
         let (cols, rows) = self.screen;
-        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).ok()?;
-        terminal.draw(|f| crate::ui::draw(f, self)).ok()?;
+        if cols == 0 || rows == 0 {
+            return None;
+        }
 
-        let ((x0, y0), (x1, y1)) = sel.bounds();
+        let rect = self.pane_rect(sel.pane)?;
+        if rect.width == 0 || rect.height == 0 {
+            return None;
+        }
+
+        let ((c0, l0), (c1, l1)) = sel.bounds();
+        let saved = self.pane_scrollback(sel.pane);
         let mut out = String::new();
-        let y1 = y1.min(rows.saturating_sub(1));
 
-        for y in y0..=y1 {
-            let start = if y == y0 { x0 } else { 0 };
-            let end = if y == y1 {
-                x1
-            } else {
-                cols.saturating_sub(1)
-            };
-            let mut line = String::new();
+        for line in l0..=l1 {
+            /* Bring the line into view if the selection reaches beyond it. */
+            let visible = self.screen_row_for_line(sel.pane, rect, line);
 
-            for x in start..=end.min(cols.saturating_sub(1)) {
-                line.push_str(terminal.backend().buffer()[(x, y)].symbol());
+            if visible.is_none() {
+                let offset = self.scrollback_for_line(rect, line);
+                self.set_pane_scrollback(sel.pane, offset);
             }
 
-            out.push_str(line.trim_end());
-            if y != y1 {
+            let mut terminal = Terminal::new(TestBackend::new(cols, rows)).ok()?;
+            terminal.draw(|f| crate::ui::draw(f, self)).ok()?;
+            let buffer = terminal.backend().buffer();
+
+            let row = self
+                .screen_row_for_line(sel.pane, rect, line)
+                .unwrap_or(rect.y);
+            let start = if line == l0 { c0 } else { rect.x };
+            let end = if line == l1 {
+                c1
+            } else {
+                rect.x + rect.width - 1
+            };
+            let mut text = String::new();
+
+            for x in start..=end {
+                text.push_str(buffer[(x.min(cols - 1), row.min(rows - 1))].symbol());
+            }
+
+            out.push_str(text.trim_end());
+            if line != l1 {
                 out.push('\n');
+            }
+
+            if visible.is_none() {
+                self.set_pane_scrollback(sel.pane, saved);
             }
         }
 
@@ -596,25 +675,25 @@ impl App {
                     );
 
                     if matches!(self.overlay, Overlay::None) && !interactive {
-                        self.sel_bounds = match hit {
-                            Some(Hit::Pane(_)) => self
-                                .hits
-                                .iter()
-                                .rev()
-                                .find(|(rect, _)| {
-                                    matches!(hit, Some(Hit::Pane(_)))
-                                        && rect.contains((m.column, m.row).into())
-                                })
-                                .map(|(rect, _)| *rect),
-                            _ => None,
-                        };
+                        self.sel = None;
 
-                        let at = self.clamp_to_selection((m.column, m.row));
+                        if let Some(Hit::Pane(id)) = hit
+                            && let Some(rect) = self.pane_rect(id)
+                            && rect.width > 0
+                            && rect.height > 0
+                        {
+                            /* Anchored to the pane's content, so the wheel does
+                             * not drag the selection off the text it was made
+                             * on. */
+                            let col = m.column.clamp(rect.x, rect.x + rect.width - 1);
+                            let line = self.content_line(id, rect, m.row);
 
-                        self.sel = Some(Selection {
-                            start: at,
-                            end: at,
-                        });
+                            self.sel = Some(Selection {
+                                pane: id,
+                                start: (col, line),
+                                end: (col, line),
+                            });
+                        }
                     }
 
                     match hit {
@@ -664,10 +743,41 @@ impl App {
                     }
                 }
                 MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-                    let at = self.clamp_to_selection((m.column, m.row));
+                    if let Some(mut sel) = self.sel {
+                        let pane = sel.pane;
 
-                    if let Some(sel) = &mut self.sel {
-                        sel.end = at;
+                        if let Some(rect) = self.pane_rect(pane) {
+                            let last = rect.y + rect.height.saturating_sub(1);
+
+                            /*
+                             * Dragging past the pane scrolls it, which is the
+                             * only way to select text that is not on screen
+                             * yet.
+                             */
+                            if m.row < rect.y || m.row > last {
+                                let scrollback = self.pane_scrollback(pane);
+                                let step = if m.row < rect.y {
+                                    rect.y - m.row
+                                } else {
+                                    m.row - last
+                                };
+
+                                let target = if m.row < rect.y {
+                                    scrollback.saturating_add(step)
+                                } else {
+                                    scrollback.saturating_sub(step)
+                                };
+
+                                self.set_pane_scrollback(pane, target);
+                            }
+
+                            let row = m.row.clamp(rect.y, last);
+                            let col = m.column.clamp(rect.x, rect.x + rect.width - 1);
+
+                            sel.end = (col, self.content_line(pane, rect, row));
+                        }
+
+                        self.sel = Some(sel);
                     }
                 }
                 MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
@@ -676,7 +786,6 @@ impl App {
                     } else {
                         self.sel = None;
                     }
-                    self.sel_bounds = None;
                 }
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                     let delta = if m.kind == MouseEventKind::ScrollUp {
@@ -1094,6 +1203,38 @@ mod tests {
             true,
         )
     }
+    #[test]
+    fn a_selection_keeps_its_text_when_the_view_scrolls() {
+        let mut a = app();
+        let pane = a.new_pane().unwrap();
+
+        /* Enough output that the pane has a scrollback to scroll into. */
+        if let Some(p) = a.panes.iter_mut().find(|p| p.id == pane) {
+            for i in 0..200 {
+                p.parser.process(format!("line {i}\r\n").as_bytes());
+            }
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &mut a)).unwrap();
+
+        let rect = a.pane_rect(pane).unwrap();
+        let row = rect.y + 2;
+        let line = a.content_line(pane, rect, row);
+
+        assert_eq!(a.screen_row_for_line(pane, rect, line), Some(row));
+
+        /*
+         * The wheel scrolls the view; the anchor is on the text, so the line is
+         * the same one and it is simply drawn lower down. This is what the user
+         * saw break: the selection used to stay on the screen rows instead.
+         */
+        a.set_pane_scrollback(pane, a.pane_scrollback(pane) + 3);
+
+        assert_eq!(a.screen_row_for_line(pane, rect, line), Some(row + 3));
+        assert_eq!(a.content_line(pane, rect, row + 3), line);
+    }
+
     #[test]
     fn switching_preserves_sessions_and_selection() {
         let mut a = app();

@@ -154,27 +154,39 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 /// Paint the current text selection in reverse video.
 ///
-/// Drawn after the workspace and before any overlay, so the selection is
-/// visible over the content it covers but never over a dialog.
+/// The selection lives in the pane's content coordinates, so each line is
+/// mapped through the pane's current scroll offset: scrolling the view moves
+/// the highlight with the text instead of leaving it behind.
 fn highlight_selection(f: &mut Frame, app: &App) {
     let Some(sel) = app.sel else {
         return;
     };
+    let Some(rect) = app.pane_rect(sel.pane) else {
+        return;
+    };
 
     let area = f.area();
-    let ((x0, y0), (x1, y1)) = sel.bounds();
-    let y1 = y1.min(area.height.saturating_sub(1));
+    let ((c0, l0), (c1, l1)) = sel.bounds();
     let buffer = f.buffer_mut();
 
-    for y in y0..=y1 {
-        let end = if y == y1 {
-            x1
-        } else {
-            area.width.saturating_sub(1)
+    for line in l0..=l1 {
+        let Some(row) = app.screen_row_for_line(sel.pane, rect, line) else {
+            continue;
         };
 
-        for x in x0..=end.min(area.width.saturating_sub(1)) {
-            buffer[(x, y)].modifier |= Modifier::REVERSED;
+        if row >= area.height {
+            continue;
+        }
+
+        let start = if line == l0 { c0 } else { rect.x };
+        let end = if line == l1 {
+            c1
+        } else {
+            rect.x + rect.width.saturating_sub(1)
+        };
+
+        for x in start..=end.min(area.width.saturating_sub(1)) {
+            buffer[(x, row)].modifier |= Modifier::REVERSED;
         }
     }
 }
