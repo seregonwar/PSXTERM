@@ -15,6 +15,45 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  tui:
+    name: Ratatui client (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --manifest-path client/tui/Cargo.toml -- --check
+      - name: Lint
+        run: cargo clippy --locked --manifest-path client/tui/Cargo.toml --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked --manifest-path client/tui/Cargo.toml
+      - name: Release build
+        run: cargo build --release --locked --manifest-path client/tui/Cargo.toml
+      - name: Real host daemon interoperability
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-tui-host -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build-tui-host --parallel
+          ./build-tui-host/psxtermd --bind 127.0.0.1 --port 29323 --tty pipe --quiet &
+          DAEMON_PID=$!
+          trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
+          python3 -c 'import socket,time; deadline=time.monotonic()+10
+          while time.monotonic()<deadline:
+              try:
+                  s=socket.create_connection(("127.0.0.1",29323),timeout=.2); s.close(); break
+              except OSError: time.sleep(.1)
+          else: raise SystemExit("host daemon did not start")'
+          PSXTERM_TEST_PORT=29323 cargo test --locked --manifest-path client/tui/Cargo.toml --test network actual_host -- --ignored
+
   host:
     name: Host build and tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

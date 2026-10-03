@@ -35,6 +35,7 @@
 # Build directories
 /build/
 /build-*/
+/client/tui/target/
 
 # Python bytecode
 __pycache__/

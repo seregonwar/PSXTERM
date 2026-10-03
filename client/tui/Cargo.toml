@@ -1,0 +1,26 @@
+[package]
+name = "psxterm-tui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-only"
+description = "A Ratatui workspace for PSXTerm consoles and terminal sessions"
+repository = "https://github.com/seregonwar/PSXTERM"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.29"
+directories = "6.0"
+# Rendered line counts keep help/license scrolling correct after resizing.
+ratatui = { version = "=0.30.2", features = ["unstable-rendered-line-info"] }
+serde = { version = "1.0", features = ["derive"] }
+# Keep the JSON backend compatible with the declared Rust toolchain.
+serde_json = "=1.0.145"
+tempfile = "3.24"
+vt100 = "0.16.2"
+unicode-width = "0.2.2"
+
+[profile.release]
+lto = "thin"
+strip = true

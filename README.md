@@ -36,6 +36,7 @@ Terminology follows the project's strict rules:
 | psxtermd server (poll loop, sessions, timeouts, limits) | IMPLEMENTED, HOST TESTED |
 | `psh` shell + builtins | IMPLEMENTED, HOST TESTED |
 | Host client (raw mode, resize, terminal restore, batch mode) | IMPLEMENTED, HOST TESTED |
+| Ratatui workspace client (console profiles, tabs/splits, flash actions, English/Italian) | IMPLEMENTED, WINDOWS + HOST PROTOCOL TESTED; PS4/PS5 HARDWARE TEST REQUIRED |
 | FreeBSDPTY backend (host POSIX ptmx) | IMPLEMENTED, HOST TESTED |
 | PipeTTY fallback | IMPLEMENTED, HOST TESTED |
 | External execution (host fork/exec) | IMPLEMENTED, HOST TESTED |
@@ -55,7 +56,7 @@ Terminology follows the project's strict rules:
 | Job control (jobs/fg/bg) | NOT IMPLEMENTED |
 | Hardware bring-up guide | WRITTEN ([docs/HARDWARE_BRINGUP.md](docs/HARDWARE_BRINGUP.md)) |
 | CI: host build/tests, ASan/UBSan, PS4/PS5 SDK payload jobs | IMPLEMENTED |
-| Client on Windows | UNSUPPORTED (protocol layer is portable) |
+| Client on Windows | Ratatui client IMPLEMENTED, HOST TESTED; C client remains POSIX-only |
 | Authentication | Architecture + shared-token mode IMPLEMENTED; disabled by default (insecure development mode) |
 
 The PS4/PS5 builds produce payload ELFs with the official
@@ -75,11 +76,22 @@ platform/host/     host backend (Linux/macOS): POSIX PTY, fork/exec
 platform/ps4/      PS4 backend: raw ptmx, elfldr-style spawn, fs prep
 platform/ps5/      PS5 backend: raw ptmx, elfldr-style spawn, fs prep
 client/            psxterm host client
+client/tui/        portable Rust/Ratatui console workspace + flash CLI
 tools/             psxterm-ttyprobe, cli_test
 tests/             host unit tests (CTest) and tests/integration (Python)
 ```
 
 ## Building
+
+The native Windows/Linux/macOS workspace client is built separately:
+
+```console
+cargo build --release --locked --manifest-path client/tui/Cargo.toml
+cargo run --release --manifest-path client/tui/Cargo.toml -- --lang it
+```
+
+See [the workspace client guide](docs/CLIENT_TUI.md) for console profiles,
+multiple terminals, flash commands, localization and shortcuts.
 
 Host (development, Linux/macOS/WSL):
 
