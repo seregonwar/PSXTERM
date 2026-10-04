@@ -671,6 +671,26 @@ def test_multiple_sessions_are_isolated():
         b.close()
 
 
+def test_large_environment_allows_cd_and_export():
+    # Hosted runners and desktop shells often inherit more than 64 variables.
+    inherited = {"PSXTERM_CI_%03d" % i: "value" for i in range(130)}
+    with Daemon(env=inherited) as daemon:
+        client = Client(daemon)
+        try:
+            client.drain()
+            text, status, _ = client.execute("cd /")
+            check(status == 0, "cd failed with a large inherited environment: %r" % text)
+            text, status, _ = client.execute("pwd")
+            check(status == 0 and text.rstrip().endswith("/"), "cwd did not change")
+            text, status, _ = client.execute("export PSXTERM_CI_MARK=retained")
+            check(status == 0, "export failed with a large inherited environment")
+            text, status, _ = client.execute("/usr/bin/env", eof=True)
+            check(status == 0 and "PSXTERM_CI_MARK=retained" in text,
+                  "spawn lost an environment entry after the old 128-entry bound")
+        finally:
+            client.close()
+
+
 def test_interrupt_via_signal_frame():
     with Daemon() as daemon:
         client = Client(daemon)
@@ -1554,6 +1574,7 @@ TESTS = [
     test_authentication,
     test_session_limit,
     test_multiple_sessions_are_isolated,
+    test_large_environment_allows_cd_and_export,
     test_interrupt_via_signal_frame,
     test_pipe_tty_fallback,
     test_pipe_tty_forced_pty,

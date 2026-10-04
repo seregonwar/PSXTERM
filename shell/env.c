@@ -5,6 +5,8 @@
 #include "psxterm/session.h"
 
 #define PSX_ENV_ENTRY_MAX 65536
+/* Inherited environments must leave room for cd/export and runtime paths. */
+#define PSX_ENV_INHERIT_MAX (PSX_ENV_MAX - 16)
 
 static int
 env_index_of(const psx_env_t *env, const char *name, size_t name_len)
@@ -149,6 +151,12 @@ psx_env_init(psx_env_t *env, char *const *inherit)
 
     if(inherit) {
         for(char *const *entry = inherit; *entry; entry++) {
+            const char *eq = strchr(*entry, '=');
+
+            if(env->count >= PSX_ENV_INHERIT_MAX && eq &&
+               env_index_of(env, *entry, (size_t)(eq - *entry)) < 0) {
+                continue;
+            }
             psx_env_set_entry(env, *entry);
         }
     }

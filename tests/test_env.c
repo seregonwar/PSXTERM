@@ -84,6 +84,32 @@ test_entry_bounds(void)
     psx_env_clear(&env);
 }
 
+static void
+test_large_inherited_environment(void)
+{
+    psx_env_t env;
+    char entries[PSX_ENV_MAX + 10][32];
+    char *inherit[PSX_ENV_MAX + 12];
+
+    for(size_t i = 0; i < PSX_ENV_MAX + 10; i++) {
+        snprintf(entries[i], sizeof(entries[i]), "RUNNER_%zu=value", i);
+        inherit[i] = entries[i];
+    }
+    /* An existing variable can still be overridden after the import limit. */
+    inherit[PSX_ENV_MAX + 10] = "TERM=vt100";
+    inherit[PSX_ENV_MAX + 11] = NULL;
+
+    psx_env_init(&env, inherit);
+    PSX_CHECK(psx_env_count(&env) <= PSX_ENV_MAX - 16);
+    PSX_CHECK_STR_EQ(psx_env_get(&env, "TERM"), "vt100");
+    PSX_CHECK_STR_EQ(psx_env_get(&env, "PSXTERM"), "1");
+    PSX_CHECK_EQ(psx_env_set(&env, "PWD", "/"), 0);
+    PSX_CHECK_EQ(psx_env_set(&env, "OLDPWD", "/tmp"), 0);
+    PSX_CHECK_EQ(psx_env_set(&env, "MARK", "alpha"), 0);
+    PSX_CHECK_STR_EQ(psx_env_get(&env, "MARK"), "alpha");
+    psx_env_clear(&env);
+}
+
 int
 main(void)
 {
@@ -91,6 +117,7 @@ main(void)
     test_set_get_unset();
     test_long_values();
     test_entry_bounds();
+    test_large_inherited_environment();
 
     return PSX_TEST_SUMMARY();
 }

@@ -21,6 +21,11 @@ Compatible Cargo updates are grouped; major updates remain separate. Release
 notes use `.github/release.yml` categories. No workflow automatically merges PRs
 or commits generated locale files.
 
+Verify and Nightly use Rust 1.88.0, the client's declared minimum version,
+including rustfmt and Clippy. SDK jobs export an absolute `PS4_PAYLOAD_SDK` or
+`PS5_PAYLOAD_SDK` path for compiler/linker wrappers as well as the CMake
+toolchain. Keep these environment variables when reproducing an SDK build.
+
 ## Nightly downloads
 
 The schedule targets **22:00 Europe/Rome**, using two UTC cron entries and a

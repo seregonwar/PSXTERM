@@ -61,6 +61,17 @@ psx_tty_backend_name(psx_tty_backend_t backend)
 
 static int g_forced_backend = -1;
 
+bool
+psx_tty_probe_usable(const psx_tty_probe_result_t *result)
+{
+    bool usable = result->ptmx_open && result->slave_open && result->termios &&
+                  result->winsize;
+#ifndef PSXTERM_HOST
+    usable = usable && result->tiocgptn;
+#endif
+    return usable;
+}
+
 void
 psx_tty_force_backend(psx_tty_backend_t backend)
 {
@@ -81,8 +92,7 @@ psx_tty_default_backend(void)
         psx_tty_probe_result_t probe;
 
         psx_tty_probe(&probe);
-        cached = (probe.ptmx_open && probe.tiocgptn && probe.slave_open &&
-                  probe.termios && probe.winsize)
+        cached = psx_tty_probe_usable(&probe)
                      ? PSX_TTY_BACKEND_FREEBSD_PTY
                      : PSX_TTY_BACKEND_PIPE;
 
@@ -231,9 +241,6 @@ psx_tty_probe_print(const psx_tty_probe_result_t *result, FILE *out)
     fprintf(out, "  detail: %s\n",
             result->detail[0] ? result->detail : "(none)");
     fprintf(out, "  FreeBSDPTY backend ...... %s\n",
-            (result->ptmx_open && result->tiocgptn && result->slave_open &&
-             result->termios && result->winsize)
-                ? "available"
-                : "not available");
+            psx_tty_probe_usable(result) ? "available" : "not available");
     fprintf(out, "  PipeTTY fallback ........ available\n");
 }

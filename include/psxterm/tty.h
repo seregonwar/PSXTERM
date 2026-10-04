@@ -74,6 +74,8 @@ int psx_tty_set_size(psx_tty_t *tty, uint16_t rows, uint16_t cols);
 
 /* Runs the platform capability probe (never fatal). */
 void psx_tty_probe(psx_tty_probe_result_t *result);
+/* Whether this platform can use the probed PTY (POSIX hosts may use ptsname). */
+bool psx_tty_probe_usable(const psx_tty_probe_result_t *result);
 void psx_tty_probe_print(const psx_tty_probe_result_t *result, FILE *out);
 
 /* --- platform hooks, implemented under platform/<plat>/tty.c ------------ */

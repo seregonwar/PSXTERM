@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -588,9 +589,14 @@ check_tty(psx_diag_report_t *report)
     psx_diag_add(group, "/dev/ptmx", probe.ptmx_open ? PSX_DIAG_PASS : PSX_DIAG_FAIL,
                  probe.ptmx_open ? 0 : errno, "%s",
                  probe.ptmx_open ? "/dev/ptmx open" : probe.detail);
+#if defined(PSXTERM_HOST) && !defined(TIOCGPTN)
+    psx_diag_add(group, "TIOCGPTN", PSX_DIAG_SKIP, 0,
+                 "not supported on this host; POSIX ptsname is used");
+#else
     psx_diag_add(group, "TIOCGPTN", probe.tiocgptn ? PSX_DIAG_PASS : PSX_DIAG_FAIL,
                  probe.tiocgptn ? 0 : errno, "%s",
                  probe.tiocgptn ? "pts number reported" : probe.detail);
+#endif
     psx_diag_add(group, "PTY slave", probe.slave_open ? PSX_DIAG_PASS : PSX_DIAG_FAIL,
                  probe.slave_open ? 0 : errno, "%s",
                  probe.slave_open ? "/dev/pts/<n> open" : probe.detail);

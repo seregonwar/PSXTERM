@@ -536,7 +536,7 @@ server_handle_error(psx_server_t *server, psx_session_t *session,
 static int
 server_loop(psx_server_t *server)
 {
-    size_t cap = 2 + server->config->max_sessions * 3;
+    size_t cap = 2 + server->config->max_sessions * 5;
 
     server->pfds = calloc(cap, sizeof(struct pollfd));
     server->owners = calloc(cap, sizeof(uint32_t));

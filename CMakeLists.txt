@@ -32,6 +32,10 @@ if(PSXTERM_PLATFORM STREQUAL "host")
   add_compile_options(-Werror)
   # POSIX.1-2008 interfaces on the development host (Linux/macOS).
   add_compile_definitions(_POSIX_C_SOURCE=200809L)
+  if(APPLE)
+    # Keep Darwin's socket, stat and device-number extensions visible.
+    add_compile_definitions(_DARWIN_C_SOURCE=1)
+  endif()
 endif()
 
 # ---------------------------------------------------------------------------

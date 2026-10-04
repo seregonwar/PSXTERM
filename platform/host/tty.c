@@ -2,8 +2,7 @@
  * Host (Linux/macOS) FreeBSDPTY-compatible backend.
  *
  * Uses the POSIX ptmx API where available; the runtime probe additionally
- * exercises TIOCGPTN and the /dev/pts/<n> path so host results are directly
- * comparable with PS4/PS5 probe results.
+ * exercises TIOCGPTN on Linux and ptsname on other POSIX hosts.
  */
 #define _XOPEN_SOURCE 700
 #define _DEFAULT_SOURCE 1
@@ -136,6 +135,7 @@ psx_platform_tty_probe(psx_tty_probe_result_t *result)
         goto out;
     }
 
+#ifdef TIOCGPTN
     if(ioctl(master, TIOCGPTN, &pts_number) == 0) {
         result->tiocgptn = true;
         result->pts_number = pts_number;
@@ -143,6 +143,7 @@ psx_platform_tty_probe(psx_tty_probe_result_t *result)
         snprintf(result->detail, sizeof(result->detail),
                  "TIOCGPTN not supported on this host");
     }
+#endif
 
     if(pts_number >= 0) {
         snprintf(name, sizeof(name), "/dev/pts/%d", pts_number);

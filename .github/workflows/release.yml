@@ -135,9 +135,12 @@ jobs:
           set -euo pipefail
           wget -q "https://github.com/${{ matrix.sdk_repo }}/releases/latest/download/${{ matrix.sdk_asset }}"
           unzip -q "${{ matrix.sdk_asset }}" -d sdk
-          SDK_DIR="$(find sdk -mindepth 1 -maxdepth 1 -type d | head -1)"
+          SDK_DIR="$(find "$PWD/sdk" -mindepth 1 -maxdepth 1 -type d | head -1)"
           test -n "$SDK_DIR"
           echo "SDK_DIR=$SDK_DIR" >> "$GITHUB_ENV"
+          # The PS4 SDK linker wrapper reads this variable independently of CMake.
+          echo "PS4_PAYLOAD_SDK=$SDK_DIR" >> "$GITHUB_ENV"
+          echo "PS5_PAYLOAD_SDK=$SDK_DIR" >> "$GITHUB_ENV"
 
       - name: Configure
         run: |

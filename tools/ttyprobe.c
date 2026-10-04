@@ -22,8 +22,7 @@ main(void)
     psx_tty_probe(&result);
     psx_tty_probe_print(&result, stdout);
 
-    available = result.ptmx_open && result.tiocgptn && result.slave_open &&
-                result.termios && result.winsize;
+    available = psx_tty_probe_usable(&result);
 
     if(!available) {
         printf("REAL PTY NOT YET AVAILABLE - PipeTTY fallback remains in "

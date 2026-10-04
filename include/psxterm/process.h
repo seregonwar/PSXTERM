@@ -10,7 +10,7 @@
  * terminator would otherwise make the kernel read past the array.
  */
 #define PSX_SPAWN_MAX_ARGS 64
-#define PSX_SPAWN_MAX_ENV 128
+#define PSX_SPAWN_MAX_ENV 256
 
 /*
  * External process execution.

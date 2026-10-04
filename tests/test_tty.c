@@ -26,6 +26,13 @@ static void
 test_default_backend(void)
 {
     psx_tty_backend_t backend = psx_tty_default_backend();
+    psx_tty_probe_result_t probe;
+
+    psx_tty_probe(&probe);
+    if(probe.ptmx_open && probe.slave_open && probe.termios && probe.winsize) {
+        /* macOS has a real POSIX PTY without Linux's TIOCGPTN ioctl. */
+        PSX_CHECK_EQ(backend, PSX_TTY_BACKEND_FREEBSD_PTY);
+    }
 
     PSX_CHECK(backend == PSX_TTY_BACKEND_FREEBSD_PTY ||
               backend == PSX_TTY_BACKEND_PIPE);
@@ -74,6 +81,34 @@ test_pipe_backend(void)
 }
 
 static void
+test_posix_probe_without_linux_ioctl(void)
+{
+    psx_tty_probe_result_t probe = {
+        .ptmx_open = true, .slave_open = true, .termios = true, .winsize = true
+    };
+
+    PSX_CHECK(psx_tty_probe_usable(&probe));
+    {
+        FILE *output = tmpfile();
+        char text[1024] = {0};
+
+        PSX_CHECK(output != NULL);
+        if(output) {
+            psx_tty_probe_print(&probe, output);
+            rewind(output);
+            fread(text, 1, sizeof(text) - 1, output);
+            fclose(output);
+            PSX_CHECK(strstr(text, "FreeBSDPTY backend ...... available") != NULL);
+        }
+    }
+    probe.winsize = false;
+    PSX_CHECK(!psx_tty_probe_usable(&probe));
+    probe.winsize = true;
+    probe.slave_open = false;
+    PSX_CHECK(!psx_tty_probe_usable(&probe));
+}
+
+static void
 test_freebsd_pty_backend(void)
 {
     psx_tty_t tty;
@@ -119,6 +154,7 @@ main(void)
     test_probe_returns_structured_result();
     test_default_backend();
     test_pipe_backend();
+    test_posix_probe_without_linux_ioctl();
     test_freebsd_pty_backend();
 
     return PSX_TEST_SUMMARY();

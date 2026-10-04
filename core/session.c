@@ -772,6 +772,7 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
     char *envp[PSX_ENV_MAX + 1];
     pid_t pid;
     int stderr_pipe[2] = {-1, -1};
+    int stdin_pair[2] = {-1, -1};
 
     if(session->proc.running) {
         errno = EBUSY;
@@ -848,9 +849,9 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
 
     session->proc.stdin_fd = -1;
     options.stdin_fd = session->tty.slave_fd;
-    {
-        int stdin_pair[2] = {-1, -1};
-
+    /* A real PTY supplies stdin as well as output and the controlling tty.
+     * PipeTTY uses a separate input stream so EOF does not close output. */
+    if(!session->tty.is_real_pty) {
         if(psx_socket_pair(stdin_pair) == 0) {
             psx_set_cloexec(stdin_pair[0], true);
             psx_set_cloexec(stdin_pair[1], true);
@@ -886,6 +887,11 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
             if(stderr_pipe[1] >= 0) {
                 close(stderr_pipe[1]);
             }
+            if(stdin_pair[0] >= 0) {
+                close(stdin_pair[0]);
+                close(stdin_pair[1]);
+                session->proc.stdin_fd = -1;
+            }
             errno = saved_errno;
             return -1;
         }
@@ -899,10 +905,20 @@ psx_session_spawn_process(psx_session_t *session, const char *path,
             close(stderr_pipe[0]);
             close(stderr_pipe[1]);
         }
+        if(stdin_pair[0] >= 0) {
+            close(stdin_pair[0]);
+            close(stdin_pair[1]);
+            session->proc.stdin_fd = -1;
+        }
         errno = saved_errno;
         return -1;
     }
 
+    /* Only the child owns the read end after spawn. Keeping it in the daemon
+     * leaked one descriptor on every PipeTTY command. */
+    if(stdin_pair[1] >= 0) {
+        close(stdin_pair[1]);
+    }
     if(stderr_pipe[1] >= 0) {
         close(stderr_pipe[1]);
     }

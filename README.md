@@ -202,9 +202,10 @@ expose the daemon to untrusted networks while authentication is disabled.
 
 * 9 host unit suites via CTest (protocol, parser, env, registry, session,
   tty, shell, diagnostics, runtime).
-* 49 host integration tests driving a real daemon with an independent Python
+* 50 host integration tests driving a real daemon with an independent Python
   implementation of PTTY/1, covering malformed input, authentication, session
-  limits, resize, signals, multi-session isolation, timeouts, the doctor
+  limits, resize, signals, multi-session isolation, large inherited environments,
+  timeouts, the doctor
   command (human, JSON, busy session, client binary), capabilities,
   backpressure floods with bounded-RSS assertions, detach/attach/resume with
   scrollback truncation, file transfer (roundtrip, atomicity, path safety,
