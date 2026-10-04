@@ -5,7 +5,7 @@ use psxterm_tui::{
     protocol::*,
 };
 use std::{
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
     sync::mpsc,
@@ -95,11 +95,13 @@ fn cancellation_during_fragmented_hello_never_opens_a_terminal() {
         stream.write_all(&ack[..8]).unwrap();
         ready.send(()).unwrap();
         let mut byte = [0];
-        assert_eq!(
-            stream.read(&mut byte).unwrap(),
-            0,
-            "OPEN was sent after cancellation"
-        );
+        // Closing before the partial ACK is consumed can reset TCP instead of
+        // returning EOF. Both mean cancellation; any received byte is an OPEN.
+        match stream.read(&mut byte) {
+            Ok(0) => {}
+            Err(error) if error.kind() == ErrorKind::ConnectionReset => {}
+            result => panic!("OPEN or unexpected read after cancellation: {result:?}"),
+        }
     });
     let connection = Connection::start(console(port), 24, 80, None);
     receive.recv_timeout(Duration::from_secs(3)).unwrap();
