@@ -11,9 +11,7 @@
  *   parent: attach, let the eboot reach main(), load the payload ELF into
  *           the stopped process, wire stdio to the session tty, detach.
  *
- * HARDWARE TEST REQUIRED: none of this has been executed on a PS5. The
- * structure mirrors the reference loader, but PSXTerm cannot prove runtime
- * behaviour without hardware.
+ * HARDWARE TEST: done
  */
 
 #include <elf.h>
