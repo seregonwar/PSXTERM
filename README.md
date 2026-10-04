@@ -158,6 +158,10 @@ bring-up sequence and failure triage.
 ### psh
 
 Built-ins: `help pwd cd ls cat clear env export unset uname whoami ps exit`.
+`ls` provides adaptive columns, bright file colours, aligned long listings and
+`LS_COLORS` customisation. All built-ins have `--help`; see
+[terminal output and verification](docs/TERMINAL_OUTPUT.md) for supported
+options, palette settings and test scope.
 Anything else is resolved through `PATH` (default `/data/psxterm/bin`, with an
 implicit `.elf` suffix on consoles) and executed as an external ELF on the
 session tty.
@@ -198,7 +202,7 @@ expose the daemon to untrusted networks while authentication is disabled.
 
 * 9 host unit suites via CTest (protocol, parser, env, registry, session,
   tty, shell, diagnostics, runtime).
-* 45 host integration tests driving a real daemon with an independent Python
+* 49 host integration tests driving a real daemon with an independent Python
   implementation of PTTY/1, covering malformed input, authentication, session
   limits, resize, signals, multi-session isolation, timeouts, the doctor
   command (human, JSON, busy session, client binary), capabilities,
@@ -206,6 +210,8 @@ expose the daemon to untrusted networks while authentication is disabled.
   scrollback truncation, file transfer (roundtrip, atomicity, path safety,
   client binary), runtime metadata JSON escaping and restart preservation,
   manifest failure reporting and a disconnect/fd-leak stress loop.
+  Four output matrices cover all built-ins, 95 exact GNU `ls` comparisons,
+  13 GNU `cat` comparisons and colours/Unicode at six terminal widths.
 * The host PipeTTY stdio matrix checks live `fgets`, binary `fread`, output
   after stdin EOF, separate stdout/stderr channels, the real client, session
   reuse, descriptor cleanup and detached stderr. See

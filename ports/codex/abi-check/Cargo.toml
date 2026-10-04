@@ -1,0 +1,14 @@
+[package]
+name = "psxterm-codex-abi-check"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+libc = { version = "=0.2.186", default-features = false }
+
+# This compile-only probe is independent of the main project and of Codex.
+[workspace]

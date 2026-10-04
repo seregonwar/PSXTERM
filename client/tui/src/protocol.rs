@@ -122,6 +122,20 @@ pub struct Connection {
     worker: thread::JoinHandle<()>,
 }
 impl Connection {
+    #[cfg(test)]
+    pub(crate) fn queued(events: Vec<Event>) -> Self {
+        let (tx, _commands) = mpsc::sync_channel(1);
+        let (sender, rx) = mpsc::sync_channel(events.len());
+        for event in events {
+            sender.send(event).unwrap();
+        }
+        Self {
+            tx,
+            rx,
+            control: Arc::new(AtomicU8::new(0)),
+            worker: thread::spawn(|| {}),
+        }
+    }
     pub fn start(console: Console, rows: u16, cols: u16, resume: Option<Resume>) -> Self {
         let (tx, commands) = mpsc::sync_channel(64);
         let (events, rx) = mpsc::sync_channel(64);
@@ -364,6 +378,30 @@ fn connect_inner(
 pub fn dimensions(rows: u16, cols: u16) -> Vec<u8> {
     [rows.max(1).to_le_bytes(), cols.max(1).to_le_bytes()].concat()
 }
+fn forward_commands(
+    stream: &mut TcpStream,
+    sid: u32,
+    commands: &Receiver<Command>,
+    ping: &mut Option<Instant>,
+    sessions: &mut Vec<u8>,
+) -> Result<()> {
+    for command in commands.try_iter().take(16) {
+        let (kind, payload) = match command {
+            Command::Input(bytes) => (STDIN, bytes),
+            Command::Resize(r, c) => (RESIZE, dimensions(r, c)),
+            Command::Ping => {
+                *ping = Some(Instant::now());
+                (PING, b"psxterm-tui-ping".to_vec())
+            }
+            Command::Sessions => {
+                sessions.clear();
+                (SESSIONS_REQUEST, vec![])
+            }
+        };
+        send_frame(stream, kind, sid, payload)?;
+    }
+    Ok(())
+}
 fn worker(
     console: Console,
     rows: u16,
@@ -395,21 +433,7 @@ fn worker(
             )?;
             return Ok(());
         }
-        for command in commands.try_iter().take(16) {
-            let (kind, payload) = match command {
-                Command::Input(bytes) => (STDIN, bytes),
-                Command::Resize(r, c) => (RESIZE, dimensions(r, c)),
-                Command::Ping => {
-                    ping = Some(Instant::now());
-                    (PING, b"psxterm-tui-ping".to_vec())
-                }
-                Command::Sessions => {
-                    sessions.clear();
-                    (SESSIONS_REQUEST, vec![])
-                }
-            };
-            send_frame(&mut stream, kind, sid, payload)?;
-        }
+        forward_commands(&mut stream, sid, &commands, &mut ping, &mut sessions)?;
         match stream.read(&mut buffer) {
             Ok(0) => {
                 if !decoder.bytes.is_empty() {
@@ -464,9 +488,32 @@ fn worker(
                 )),
                 _ => None,
             };
-            if let Some(event) = event
-                && !emit(events, stop, event)
-            {
+            let mut enqueued = true;
+            if let Some(mut event) = event {
+                loop {
+                    match events.try_send(event) {
+                        Ok(()) => break,
+                        Err(TrySendError::Full(e)) if stop.load(Ordering::Acquire) == 0 => {
+                            // Backpressure retains this exact event, while
+                            // input/resize still reach a busy remote process.
+                            event = e;
+                            forward_commands(
+                                &mut stream,
+                                sid,
+                                &commands,
+                                &mut ping,
+                                &mut sessions,
+                            )?;
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => {
+                            enqueued = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !enqueued {
                 let action = stop.load(Ordering::Acquire);
                 if action != 0 {
                     send_frame(
@@ -485,6 +532,72 @@ fn worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn full_output_queue_still_delivers_input_and_preserves_event_order() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (received, input) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            assert_eq!(read_frame(&mut stream).unwrap().kind, HELLO);
+            send_frame(&mut stream, HELLO_ACK, 0, b"\0HOST".to_vec()).unwrap();
+            assert_eq!(read_frame(&mut stream).unwrap().kind, OPEN);
+            send_frame(&mut stream, OPEN_OK, 7, vec![]).unwrap();
+            let mut output = Vec::new();
+            for n in 0..32 {
+                output.extend(
+                    Frame {
+                        kind: STDOUT,
+                        sid: 7,
+                        payload: vec![n],
+                    }
+                    .encode()
+                    .unwrap(),
+                );
+            }
+            stream.write_all(&output).unwrap();
+            let frame = read_frame(&mut stream).unwrap();
+            assert_eq!(frame.kind, STDIN);
+            assert_eq!(frame.payload, [3]);
+            received.send(()).unwrap();
+        });
+        let console = Console {
+            id: 1,
+            name: "test".into(),
+            host: "127.0.0.1".into(),
+            port,
+            token: None,
+            token_env: None,
+        };
+        let (tx, commands) = mpsc::sync_channel(64);
+        let (events, rx) = mpsc::sync_channel(1);
+        let stop = Arc::new(AtomicU8::new(0));
+        let control = stop.clone();
+        let handle =
+            thread::spawn(move || worker(console, 24, 80, None, commands, &events, &control));
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Event::Connected(7, _)
+        ));
+        // One output event is buffered; the next cannot be enqueued until the
+        // UI drains it. Input must reach the server before that happens.
+        thread::sleep(Duration::from_millis(50));
+        tx.send(Command::Input(vec![3])).unwrap();
+        let delivered = input.recv_timeout(Duration::from_secs(1)).is_ok();
+        let mut output = Vec::new();
+        while let Ok(Event::Output(bytes)) = rx.recv_timeout(Duration::from_secs(2)) {
+            output.extend(bytes);
+        }
+        stop.store(2, Ordering::Release);
+        let result = handle.join().unwrap();
+        assert!(delivered, "input stalled behind the full output queue");
+        assert_eq!(output, (0..32).collect::<Vec<_>>());
+        assert!(result.is_ok());
+        server.join().unwrap();
+    }
     #[test]
     fn fragmented_binary_frames_and_limits() {
         let original = Frame {

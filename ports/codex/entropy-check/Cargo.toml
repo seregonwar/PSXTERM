@@ -1,0 +1,18 @@
+[package]
+name = "psxterm-codex-entropy-check"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+getrandom02 = { package = "getrandom", version = "=0.2.17", default-features = false }
+getrandom03 = { package = "getrandom", version = "=0.3.4", default-features = false }
+getrandom04 = { package = "getrandom", version = "=0.4.2", default-features = false }
+# Match the upstream versions of the two dependencies compiled on FreeBSD.
+libc = { version = "=0.2.186", default-features = false }
+cfg-if = "=1.0.4"
+
+[workspace]

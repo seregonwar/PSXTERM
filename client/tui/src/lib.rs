@@ -1,9 +1,15 @@
 pub mod app;
 pub mod clipboard;
+pub mod colors;
 pub mod config;
+pub mod export;
 pub mod flash;
 pub mod i18n;
+pub mod input;
 pub mod protocol;
+pub mod repaint;
+pub mod search;
 pub mod snapshot;
 pub mod terminal;
 pub mod ui;
+mod work;

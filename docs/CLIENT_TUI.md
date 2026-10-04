@@ -49,8 +49,14 @@ shows an actionable connection error while the interface stays responsive.
 - Every terminal starts with a colored PSXTERM banner, credits to **seregonwar**
   and a GPLv3 license notice. The palette also exposes the complete original
   license text, including its no-warranty terms.
-- The interface uses a restrained charcoal and gray palette. Only the PSXTERM
-  logo uses a gradient; program output retains its original ANSI colors.
+- The interface uses a restrained charcoal and gray palette. The PSXTERM
+  logo uses a gradient. By default, the 16 basic ANSI foreground colors use a
+  readable palette with at least 4.5:1 contrast against the terminal's default
+  charcoal background. This makes directory names and executable files in `ls`
+  easier to distinguish. RGB colors, extended indexed colors, backgrounds and
+  text attributes retain their original values. Custom backgrounds and dim text
+  can have different contrast. Use F2 → `/colors` to switch to original colors,
+  or start with `--output-colors original`; `readable` restores the default.
   Connection state appears once in the terminal footer, console details in the
   sidebar, and keyboard hints in the workspace footer.
 - ANSI colors, cursor movement, Unicode, combining characters, application
@@ -70,9 +76,13 @@ shows an actionable connection error while the interface stays responsive.
 | F8 | Close current terminal, after confirmation |
 | F9 | Move focus to/from the sidebar |
 | F10 | Toggle full sidebar / compact rail |
+| F11 | Search terminal output and retained history locally |
+| F12 | Export terminal text to a local file |
 | Alt+1…8, Ctrl+PageUp/PageDown | Switch terminal |
 | Shift+PageUp/PageDown, mouse wheel | Scroll local history |
 | Ctrl+End | Return to live output |
+| Mouse drag, then release | Select and copy terminal text |
+| Ctrl+Shift+C | Copy selection, or the visible terminal when nothing is selected |
 | Ctrl+Q | Quit, after confirming that all open sessions will end |
 
 In sidebar focus, use arrows to select, Enter to return to the terminal, or N
@@ -80,6 +90,105 @@ for a new terminal. Mouse clicks select profiles, tabs, panes and actions.
 Tab, Esc and Ctrl+C reach the remote program when no dialog is open. Ctrl+D
 sends the protocol's explicit EOF marker. Multiline paste requires confirmation;
 the profile form also accepts paste and masks the token field.
+
+Copy reads terminal cells directly, excluding workspace borders and controls.
+It preserves Unicode, combining characters and the order of multiple lines,
+including retained history. Automatic line wrapping does not add a newline to
+the copied text. Scrolling preserves the selection; new output in its terminal
+or a change in pane dimensions cancels it to avoid copying shifted content.
+Clipboard delivery uses OSC 52 and requires support from the hosting terminal.
+
+The workspace redraws when input, output or connection state changes. It
+coalesces bursts into frames, with a normal maximum of about 60 frames per
+second; clicks and resizing can refresh mouse targets immediately. An unchanged
+workspace does not redraw during idle polling.
+
+Parsing busy connections also yields to input. One update shares a 6 ms,
+64-event and 256 KiB budget across the workspace; an individual frame already
+started may finish beyond those limits. Each pane handles at most eight events
+or 64 KiB of output before yielding (finishing the current frame), and the next update starts with the
+next pane. Unconsumed events stay in their bounded FIFO; output is not dropped.
+When the output queue is full, the connection worker still forwards input and
+resize commands, so a command such as Ctrl+C does not wait for it to drain.
+
+The queued-output regression test fills eight terminals with 64 mixed-size
+frames each. In a local Windows release run, the first update fell from about
+175 ms before this change to 3.6 ms afterwards; draining the whole burst took
+about 179 ms. These are measurements for that synthetic workload and machine,
+not a timing guarantee. Reproduce the current measurement with:
+
+```console
+cargo test --release --locked --manifest-path client/tui/Cargo.toml --lib busy_poll_yields -- --nocapture
+```
+
+In split view, the mouse wheel scrolls the terminal under the pointer and keeps
+keyboard focus in the selected terminal. The wheel over workspace controls
+does not scroll a terminal. New output preserves the history viewport being
+read until those rows are evicted from the retained history.
+
+Dialog fields share a UTF-8-safe editor: Left/Right moves the caret, Home/End
+or Ctrl+A/E goes to the beginning/end, Backspace/Delete removes behind/ahead,
+and Ctrl+U clears the field. Paste inserts at the caret. Clicking inside a
+field places the caret in its visible text; clipped fields keep it on screen.
+Token fields remain masked while editing and scrolling. Name limits are 48
+characters for consoles and 32 for terminals; host/token limits are 253/255
+UTF-8 bytes, and ports accept at most five characters. Limits apply equally to
+typing and paste, without splitting a Unicode character.
+
+F11 or F2 → `/search` opens a search bar below the workspace. Type or paste a
+literal phrase; search ignores case and includes the terminal's retained
+history. It joins rows marked as automatically wrapped by the terminal parser,
+keeps explicit spaces and highlights complete wide/combining character cells.
+The most recent match is selected first. Enter/Down moves forward, Shift+Enter/Up
+moves backward, and Home/End selects the oldest/newest result. The arrow buttons
+provide the same navigation with the mouse. Left/Right and mouse clicks edit
+the query; Ctrl+Home/End or Ctrl+A/E moves its caret to the beginning/end.
+The palette uses the same distinction between result and caret navigation.
+Moving the search caret preserves the selected match and scroll position,
+including when output has changed; an actual text edit refreshes stale results.
+Ctrl+U clears the query; Esc, F11
+or × closes the bar and leaves the current scroll position in place. Ctrl+End
+after closing the bar returns to live output. F11 is reserved locally; Ctrl+F still reaches the
+remote program when no dialog is open.
+
+Search indexes the terminal only on opening, editing after output changes, or
+refresh/navigation after output changes. It does not rescan history on each
+frame or network event. New output or a pane resize marks results stale and
+removes their highlights. F5, Enter or the refresh button updates them; F5 in
+the search bar never reconnects. Limits are 256 query characters and the latest
+10,000 non-overlapping matches; the bar reports a truncated result set. Queries
+are kept only for the open bar and are not saved or sent to the console.
+Case matching uses Unicode lowercase conversion without accent normalization.
+As with copying, line boundaries follow `vt100`; a wide character moved past
+an empty final column is treated as a separate row by that parser.
+
+F12 or F2 → `/export` opens a file dialog for the active terminal. Choose all
+retained history (the default), or only the currently visible rows, including
+the scrolled viewport. The file is a UTF-8 text snapshot captured when you save;
+it contains terminal cells without ANSI formatting, workspace borders or
+profile metadata. This is not a continuous recording: overwritten cells and
+evicted history cannot be recovered. Line wrapping follows the same parser
+rules as copying/search, and unused trailing blank rows are omitted.
+
+The suggested filename is unique to the terminal and time, in the current
+working directory. Enter a relative or absolute path; missing parent folders
+are created on save. Paths can contain spaces and Unicode and are treated
+literally (no shell, environment-variable or `~` expansion). Left/Right,
+Home/End, Backspace and Delete edit the path; Ctrl+U clears it; paste inserts
+at the cursor. Tab switches focus to the content choice, arrows/Space switch
+its value, and mouse clicks position the path caret or select content and Save/Cancel.
+Enter saves from either field. Paths are limited to 4,096 characters, subject
+to the filesystem's own limits.
+
+Serialization and file I/O run in one background worker while terminal input
+and output continue. Existing files are never overwritten, including when a
+destination appears during saving. Completion reports the path and byte count.
+After an error, F12 retains the path and scope for retry without interrupting
+the workspace with a new dialog. Only one export runs at a time. Closing its
+terminal leaves the captured export running. Quitting requests cooperative
+cancellation before committing the file and waits for workers up to the
+client's shutdown deadline; a file already committed remains saved. Demo mode
+also supports an explicitly saved local export, without writing console profiles.
 
 F5 reuses the session ID and private resume token while this client process is
 running. A daemon restart, expired session or unsupported resume operation is
@@ -99,7 +208,8 @@ deadline and are read incrementally so cancellation does not wait for that timeo
 Flash commands offer a short path to common read-only shell actions. In the UI
 they open a **dedicated terminal** so they do not type into an existing command
 or foreground application. Local actions such as rename, clear view, help,
-console editing and language selection work through the same palette.
+console editing, language selection and output color selection work through the
+same palette.
 The palette accepts words, abbreviations and `/command` IDs, ranks name matches
 first, displays shortcuts, and explains unavailable actions. Use arrows,
 PageUp/PageDown, Home/End or the mouse wheel to move; descriptions wrap in a
@@ -137,11 +247,13 @@ help, confirmations, banner notices and action descriptions are stored in
 output, standard OS/library error details and the original GPL text retain their
 original language. Existing terminal history is not rewritten on a language change.
 
-Profiles and language are written atomically to the platform's user configuration
+Profiles, language and output color preference are written atomically to the platform's user configuration
 directory (`ProjectDirs` for `dev / seregonwar / PSXTerm`). Override with
 `--config PATH`. Starting the UI with `--host` saves that profile; CLI flashes
 do not modify the profile file. Editing a profile affects new connections and
 reconnections, while existing terminals keep their current connection.
+Existing profile files without a color preference use `readable`. Demo mode
+allows changing the palette for its current run without saving a preference.
 
 Tokens entered in the profile form live only in memory. By default the client
 also reads `PSXTERM_TOKEN`; an optional `token_env` field in a profile can name
@@ -163,7 +275,9 @@ cargo test --locked --manifest-path client/tui/Cargo.toml
 cargo clippy --locked --manifest-path client/tui/Cargo.toml --all-targets -- -D warnings
 ```
 
-Snapshot views: `tabs`, `split`, `consoles`, `palette`, `form`.
+Snapshot views: `tabs`, `split`, `consoles`, `palette`, `form`, `search`, `export`.
+The search preview finds `projects` in the demo directory listing.
+The export preview opens its dialog without saving terminal text.
 Use `--snapshot-terminals 8` to preview tab overflow. The minimum workspace size
 is 55×18 cells; smaller windows display a resize hint and preserve sessions.
 Tests cover framing, streamed binary output, ANSI rendering, keyboard sequences,
@@ -182,7 +296,11 @@ quit and restoring the terminal.
 The Linux build also has an executable smoke test using a real POSIX PTY at all
 eight sizes. It decodes captured ANSI output with `vt100` and checks the actual
 screens for the flash palette, dismissing it, the small-window hint, restoring
-dimensions, split view, closing/cancelling and quit confirmation. It then verifies
+dimensions, both color modes, middle-of-query editing, Unicode terminal renaming,
+search/paste/no-match/resize/refresh, split view,
+export/paste/content selection/no-overwrite/retry/cancel, closing/cancelling
+and quit confirmation.
+It also checks that an unchanged workspace emits no idle redraw output. It then verifies
 the alternate screen and original terminal attributes are restored. Demo mode
 keeps this test independent of console availability. Run on Linux with:
 
@@ -206,9 +324,19 @@ PowerShell equivalent: set `$env:PSXTERM_TEST_PORT='29323'` before the Cargo com
 Local Windows-to-WSL validation covered multiple independent sessions, output,
 resize, ping and detach/resume with the same server session ID. **This is host
 validation, not PS4/PS5 hardware validation.**
-The native Linux client also passed the 26 default tests, both real-daemon
-tests against the local PipeTTY daemon, and the `pwd` and `ping` CLI flashes,
-using the declared minimum Rust 1.88 toolchain.
+The current frontend passed 72 default tests on Windows and native Linux using
+the declared minimum Rust 1.88 toolchain. These cover direct Unicode/history
+copy, soft wrapping, color contrast and preservation, preference migration and
+rollback, demo reconnect staying offline, redraw scheduling, bounded history
+search, Unicode matches/highlights, stale results, keyboard/mouse navigation,
+field caret placement, masked tokens, consistent UTF-8 typing/paste limits,
+fair polling of eight busy terminals, input delivery through a full output queue,
+close/detach while that queue is full, and mouse-wheel routing in split view
+and search/export previews in both languages. Export checks cover exact
+retained history, Unicode file paths, background worker progress, failure/retry,
+no overwrite, scrolled view preservation, and cancellation on quit. Three optional
+real-daemon tests are ignored by the default run. Earlier local host validation
+also exercised real-daemon sessions and the `pwd` and `ping` CLI flashes.
 Cancellation tests cover fragmented HELLO/OPEN/ATTACH replies, close and detach,
 and waiting for connections belonging to removed tabs. The real-daemon test also
 withholds OPEN_OK after creating a session, cancels the client and verifies the

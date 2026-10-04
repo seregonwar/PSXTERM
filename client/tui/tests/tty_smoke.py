@@ -10,6 +10,7 @@ import select
 import signal
 import struct
 import subprocess
+import tempfile
 import time
 
 
@@ -27,6 +28,7 @@ def run_case(executable, decoder, cols, rows, language, output):
     process = None
     started = time.monotonic()
     viewport = [cols, rows]
+    export_directory = tempfile.TemporaryDirectory(prefix="psxterm-export-")
     translations = json.loads((Path(__file__).resolve().parents[1] / "locales" / f"{language}.json").read_text(encoding="utf-8"))
 
     def size(width, height):
@@ -95,8 +97,48 @@ def run_case(executable, decoder, cols, rows, language, output):
             preexec_fn=controlling_terminal,
         )
         redraw("startup", expected="DEMO")
+        redraw("settle startup", required=False)
+        assert not select.select([master], [], [], 0.2)[0], "unchanged workspace redraws during idle"
         key(b"\x1bOQ", "flash palette", expected=translations["ui.search"])  # F2
         key(b"\x1b", "dismiss palette", expected="DEMO", absent=translations["ui.search"])
+        key(b"\x1bOQ", "color palette", expected=translations["ui.search"])
+        key(b"/colorX", "palette query", expected="/colorX")
+        key(b"\x1b[D\x1b[3~s", "edit palette query", expected="/colors")
+        key(b"\r", "original colors", expected=translations["notice.colors_original"])
+        key(b"\x1bOQ", "color palette again", expected=translations["ui.search"])
+        key(b"/colors\r", "readable colors", expected=translations["notice.colors_readable"])
+        key(b"\x1b[18~", "rename dialog", expected=translations["action.rename"])  # F7
+        key(b"\x15\x1b[200~" + "Edit 界".encode("utf-8") + b"\x1b[201~", "rename text", expected="Edit 界")
+        key(b"\x01\x1b[3~\x1b[200~R\x1b[201~", "edit beginning of name", expected="Rdit 界")
+        key(b"\r", "save renamed terminal", expected="Rdit 界")
+        key(b"\x1b[23~", "terminal search", expected=translations["search.label"])  # F11
+        key(b"\x1b[200~projects\x1b[201~", "search result", expected=translations["search.count"].format("1", "1"))
+        key(b"\x01\x1b[3~", "edit search beginning", expected="rojects")
+        key(b"\x1b[200~p\x1b[201~", "paste at search caret", expected="projects")
+        key(b"\x15missing-pattern", "search no result", expected=translations["search.none"])
+        key(b"\x15projects", "search again", expected=translations["search.count"].format("1", "1"))
+        size(cols + 1, rows)
+        redraw("search after resize", expected=translations["search.changed"].split(" · ")[0])
+        key(b"\x1b[15~", "refresh search", expected=translations["search.count"].format("1", "1"))  # F5
+        size(cols, rows)
+        redraw("search dimensions restored", expected=translations["search.changed"].split(" · ")[0])
+        key(b"\x1b", "dismiss search", expected="DEMO", absent=translations["search.label"])
+        key(b"\x1b[24~", "export dialog", expected=translations["action.export"])  # F12
+        export_path = Path(export_directory.name) / "output 界.txt"
+        key(b"\x15\x1b[200~" + str(export_path).encode("utf-8") + b"\x1b[201~", "export path", expected=export_path.name)
+        key(b"\t\x1b[B", "visible output scope", expected="● " + translations["export.visible"])
+        saved_prefix = translations["export.saved"].split("{1}")[0].strip()
+        key(b"\r", "save terminal text", expected=saved_prefix)
+        exported = export_path.read_text(encoding="utf-8")
+        assert "projects/" in exported and "cli_test" in exported, "export missed terminal output"
+        assert "\x1b" not in exported and "CONSOLE" not in exported, "export includes control codes or workspace chrome"
+        key(b"\x1b[24~", "export again", expected=translations["action.export"])
+        key(b"\x15\x1b[200~" + str(export_path).encode("utf-8") + b"\x1b[201~", "existing export path", expected=export_path.name)
+        key(b"\r", "existing file protected", expected=translations["export.exists"].split(".")[0])
+        assert export_path.read_text(encoding="utf-8") == exported, "existing output file was overwritten"
+        key(b"\x1b[24~", "retry export dialog", expected=translations["action.export"])
+        key(b"\x1b", "cancel export", expected="DEMO", absent=translations["action.export"])
+        assert len(list(Path(export_directory.name).iterdir())) == 1, "cancel created another export"
         size(40, 12)
         redraw("small-window hint", expected=translations["ui.tiny"].splitlines()[0])
         size(cols, rows)
@@ -127,6 +169,7 @@ def run_case(executable, decoder, cols, rows, language, output):
         termios.tcsetattr(slave, termios.TCSANOW, original)
         os.close(master)
         os.close(slave)
+        export_directory.cleanup()
 
 
 def main():
@@ -150,7 +193,7 @@ def main():
         results.append(run_case(executable, decoder, cols, rows, language, args.output))
         if args.output is not None:
             (args.output / "results.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
-        print(f"PASS {cols}x{rows} {language}: palette, resize, split, close/cancel, quit, restore", flush=True)
+        print(f"PASS {cols}x{rows} {language}: idle, colors, rename/query editing, search, export/no-overwrite, palette, resize, split, close/cancel, quit, restore", flush=True)
 
 
 if __name__ == "__main__":

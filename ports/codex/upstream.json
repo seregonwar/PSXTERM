@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/openai/codex.git",
+  "commit": "b741e480e203f037ca726bc2a76d99a8e8668e66",
+  "rust_toolchain": "1.95.0",
+  "toolchain_sha256": "029fd8fde748bb7dd75f20e21576e36f1f567bba8149af4602310086a2a0dc58",
+  "lockfile_sha256": "13a6b27c04e2f80a9716d51bf693cf42b670230ad36f2faab802c5e301f43fc2",
+  "entry_package": "codex-exec",
+  "libc_version": "0.2.186",
+  "libc_checksum": "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66",
+  "native_execution_verified": false
+}

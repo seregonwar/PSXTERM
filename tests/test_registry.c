@@ -21,6 +21,7 @@ test_expected_builtins(void)
             PSX_CHECK(command->execute != NULL);
             PSX_CHECK(command->description != NULL);
             PSX_CHECK(strlen(command->description) > 0);
+            PSX_CHECK(psh_command_usage(names[i]) != NULL);
         }
     }
 }
@@ -31,6 +32,7 @@ test_unknown(void)
     PSX_CHECK(psh_registry_lookup("not-a-builtin") == NULL);
     PSX_CHECK(psh_registry_lookup("") == NULL);
     PSX_CHECK(psh_registry_lookup("HELP") == NULL); /* case sensitive */
+    PSX_CHECK(psh_command_usage("missing") == NULL);
 }
 
 static void

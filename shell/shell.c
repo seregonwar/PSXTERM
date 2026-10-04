@@ -46,46 +46,60 @@ psh_shell_destroy(psx_shell_t *shell)
     free(shell);
 }
 
-int
-psh_out(psx_session_t *session, const char *fmt, ...)
+static int
+shell_vprint(psx_session_t *session, uint8_t type, const char *fmt, va_list ap)
 {
     char message[PSH_MSG_MAX];
-    va_list ap;
+    char *text = message;
+    va_list copy;
     int len;
+    int result;
 
-    va_start(ap, fmt);
-    len = vsnprintf(message, sizeof(message), fmt, ap);
-    va_end(ap);
+    va_copy(copy, ap);
+    len = vsnprintf(message, sizeof(message), fmt, copy);
+    va_end(copy);
 
     if(len < 0) {
         return -1;
     }
     if((size_t)len >= sizeof(message)) {
-        len = (int)sizeof(message) - 1;
+        if(!(text = malloc((size_t)len + 1))) {
+            return -1;
+        }
+        va_copy(copy, ap);
+        vsnprintf(text, (size_t)len + 1, fmt, copy);
+        va_end(copy);
     }
 
-    return psx_session_emit(session, PTTY_MSG_STDOUT, message, (size_t)len);
+    result = psx_session_emit(session, type, text, (size_t)len);
+    if(text != message) {
+        free(text);
+    }
+    return result;
+}
+
+int
+psh_out(psx_session_t *session, const char *fmt, ...)
+{
+    va_list ap;
+    int result;
+
+    va_start(ap, fmt);
+    result = shell_vprint(session, PTTY_MSG_STDOUT, fmt, ap);
+    va_end(ap);
+    return result;
 }
 
 int
 psh_err(psx_session_t *session, const char *fmt, ...)
 {
-    char message[PSH_MSG_MAX];
     va_list ap;
-    int len;
+    int result;
 
     va_start(ap, fmt);
-    len = vsnprintf(message, sizeof(message), fmt, ap);
+    result = shell_vprint(session, PTTY_MSG_STDERR, fmt, ap);
     va_end(ap);
-
-    if(len < 0) {
-        return -1;
-    }
-    if((size_t)len >= sizeof(message)) {
-        len = (int)sizeof(message) - 1;
-    }
-
-    return psx_session_emit(session, PTTY_MSG_STDERR, message, (size_t)len);
+    return result;
 }
 
 /* Prompt: <platform>:<cwd with $HOME shortened> $ */
@@ -109,7 +123,10 @@ psh_shell_prompt(psx_shell_t *shell)
         snprintf(display, sizeof(display), "%s", session->cwd);
     }
 
-    psh_out(shell->session, "%s:%s $ ", psx_platform_id(), display);
+    char *printable = psh_display_text(display, false, NULL);
+    psh_out(shell->session, "%s:%s $ ", psx_platform_id(),
+            printable ? printable : "?");
+    free(printable);
 }
 
 bool

@@ -49,10 +49,13 @@ set(PSXTERM_CORE_SOURCES
   core/runtime.c
   core/clock.c
   shell/shell.c
+  shell/display.c
   shell/parser.c
   shell/env.c
   shell/command_registry.c
   shell/builtins/builtin_fs.c
+  shell/builtins/builtin_cat.c
+  shell/builtins/builtin_ls.c
   shell/builtins/builtin_env.c
   shell/builtins/builtin_sys.c
   shell/builtins/builtin_help.c

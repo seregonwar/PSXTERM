@@ -26,6 +26,8 @@ impl Action {
             "rename" => "F7",
             "close" => "F8",
             "help" => "F1",
+            "search" => "F11",
+            "export" => "F12",
             _ => "",
         }
     }
@@ -34,7 +36,7 @@ impl Action {
             "category.remote"
         } else if matches!(self.id, "console" | "add" | "edit" | "remove") {
             "category.console"
-        } else if matches!(self.id, "new" | "reconnect" | "rename" | "close") {
+        } else if matches!(self.id, "new" | "reconnect" | "rename" | "close" | "unread") {
             "category.terminal"
         } else {
             "category.interface"
@@ -166,6 +168,30 @@ pub const ACTIONS: &[Action] = &[
         id: "language",
         title: "action.language",
         description: "desc.language",
+        command: None,
+    },
+    Action {
+        id: "colors",
+        title: "action.colors",
+        description: "desc.colors",
+        command: None,
+    },
+    Action {
+        id: "search",
+        title: "action.search",
+        description: "desc.search",
+        command: None,
+    },
+    Action {
+        id: "export",
+        title: "action.export",
+        description: "desc.export",
+        command: None,
+    },
+    Action {
+        id: "unread",
+        title: "action.unread",
+        description: "desc.unread",
         command: None,
     },
 ];

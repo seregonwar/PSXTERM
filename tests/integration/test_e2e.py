@@ -1513,7 +1513,31 @@ def test_runtime_manifest_failure_is_reported():
                 client.close()
 
 
+def test_builtin_output_contracts():
+    import builtin_output
+    builtin_output.builtin_contracts(sys.modules[__name__])
+
+
+def test_ls_gnu_output_matrix():
+    import builtin_output
+    builtin_output.ls_gnu_matrix(sys.modules[__name__])
+
+
+def test_cat_gnu_output_matrix():
+    import builtin_output
+    builtin_output.cat_gnu_matrix(sys.modules[__name__])
+
+
+def test_ls_terminal_output_matrix():
+    import builtin_output
+    builtin_output.ls_terminal_matrix(sys.modules[__name__])
+
+
 TESTS = [
+    test_builtin_output_contracts,
+    test_ls_gnu_output_matrix,
+    test_cat_gnu_output_matrix,
+    test_ls_terminal_output_matrix,
     test_runtime_manifest_survives_restart,
     test_runtime_manifest_failure_is_reported,
     test_handshake_and_prompt,

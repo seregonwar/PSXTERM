@@ -1,3 +1,4 @@
+use crate::colors::OutputColors;
 use crate::i18n::{Language, tr};
 use anyhow::{Context, Result, bail};
 use directories::ProjectDirs;
@@ -76,6 +77,8 @@ pub struct Config {
     pub consoles: Vec<Console>,
     #[serde(default)]
     pub language: Language,
+    #[serde(default)]
+    pub output_colors: OutputColors,
 }
 fn version() -> u32 {
     1
@@ -89,6 +92,7 @@ impl Config {
                 version: 1,
                 consoles: vec![],
                 language: Language::En,
+                output_colors: OutputColors::default(),
             },
             Err(e) => return Err(e).context(tr("error.config_read")),
         };
@@ -148,6 +152,7 @@ mod tests {
         let mut c = Config {
             version: 1,
             language: Language::En,
+            output_colors: OutputColors::default(),
             consoles: vec![Console {
                 id: 1,
                 name: "PS5".into(),
@@ -174,5 +179,19 @@ mod tests {
         fs::write(&p, "broken").unwrap();
         assert!(Config::load(&p).is_err());
         assert_eq!(fs::read_to_string(&p).unwrap(), "broken");
+    }
+    #[test]
+    fn legacy_profiles_get_readable_colors_and_the_preference_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        fs::write(&path, r#"{"version":1,"consoles":[],"language":"en"}"#).unwrap();
+        let mut config = Config::load(&path).unwrap();
+        assert_eq!(config.output_colors, OutputColors::Readable);
+        config.output_colors = OutputColors::Original;
+        config.save(&path).unwrap();
+        assert_eq!(
+            Config::load(&path).unwrap().output_colors,
+            OutputColors::Original
+        );
     }
 }

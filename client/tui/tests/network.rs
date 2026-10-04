@@ -25,6 +25,56 @@ fn finish(connection: &Connection) {
 }
 
 #[test]
+fn closing_a_connection_with_a_full_output_queue_finishes_without_draining_it() {
+    for detach in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (ready, receive) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            assert_eq!(read_frame(&mut stream).unwrap().kind, HELLO);
+            send_frame(&mut stream, HELLO_ACK, 0, b"\0HOST".to_vec()).unwrap();
+            assert_eq!(read_frame(&mut stream).unwrap().kind, OPEN);
+            send_frame(&mut stream, OPEN_OK, 11, vec![]).unwrap();
+            let mut output = Vec::new();
+            for _ in 0..256 {
+                output.extend(
+                    Frame {
+                        kind: STDOUT,
+                        sid: 11,
+                        payload: b"ordinary output\r\n".to_vec(),
+                    }
+                    .encode()
+                    .unwrap(),
+                );
+            }
+            stream.write_all(&output).unwrap();
+            ready.send(()).unwrap();
+            let control = read_frame(&mut stream).unwrap();
+            assert_eq!(control.kind, if detach { DETACH } else { CLOSE });
+            assert_eq!(control.sid, 11);
+        });
+        let connection = Connection::start(console(port), 24, 80, None);
+        assert!(matches!(
+            connection.rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            Event::Connected(11, _)
+        ));
+        receive.recv_timeout(Duration::from_secs(3)).unwrap();
+        thread::sleep(Duration::from_millis(50));
+        if detach {
+            drop(connection);
+        } else {
+            connection.close();
+            finish(&connection);
+        }
+        server.join().unwrap();
+    }
+}
+
+#[test]
 fn cancellation_during_fragmented_hello_never_opens_a_terminal() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -135,6 +185,7 @@ fn closed_tab_finishes_its_connection_even_after_all_tabs_are_removed() {
         Config {
             version: 1,
             language: Language::En,
+            output_colors: Default::default(),
             consoles: vec![console(port)],
         },
         PathBuf::new(),
@@ -338,6 +389,7 @@ fn actual_host_daemon_multiple_terminals_and_resume() {
         Config {
             version: 1,
             language: Language::En,
+            output_colors: Default::default(),
             consoles: vec![c.clone()],
         },
         PathBuf::new(),
@@ -404,6 +456,63 @@ fn actual_host_daemon_multiple_terminals_and_resume() {
             .all(|p| p.connection.as_ref().is_none_or(|c| c.finished()))
     });
 }
+#[test]
+#[ignore = "requires PSXTERM_TEST_PORT pointing to the running host daemon"]
+fn actual_host_daemon_builtin_listing_colors_and_reset() {
+    let port = std::env::var("PSXTERM_TEST_PORT").expect("set PSXTERM_TEST_PORT");
+    let c = console(port.parse().unwrap());
+    let mut app = App::new(
+        Config {
+            version: 1,
+            language: Language::En,
+            output_colors: Default::default(),
+            consoles: vec![c],
+        },
+        PathBuf::new(),
+        false,
+    );
+    app.new_pane().unwrap();
+    wait(&mut app, |a| a.current().unwrap().online);
+    app.current_mut().unwrap().resize(18, 55);
+    app.current_mut()
+        .unwrap()
+        .send(Command::Input(b"clear\nls -d --color=always /\n".to_vec()))
+        .unwrap();
+    wait(&mut app, |a| {
+        let pane = a.current().unwrap();
+        (0..18).any(|row| {
+            pane.parser.screen().cell(row, 0).is_some_and(|cell| {
+                cell.contents() == "/" && cell.fgcolor() == vt100::Color::Idx(12) && cell.bold()
+            })
+        })
+    });
+    let pane = app.current().unwrap();
+    let screen = pane.parser.screen();
+    let colored_row = (0..18)
+        .find(|row| screen.cell(*row, 0).unwrap().fgcolor() == vt100::Color::Idx(12))
+        .unwrap();
+    let after_name = screen.cell(colored_row, 1).unwrap();
+    assert_eq!(after_name.fgcolor(), vt100::Color::Default);
+    assert!(
+        !after_name.bold(),
+        "listing style leaked beyond the filename"
+    );
+    app.current_mut()
+        .unwrap()
+        .send(Command::Input(b"ls -d --color=never /\n".to_vec()))
+        .unwrap();
+    wait(&mut app, |a| {
+        let pane = a.current().unwrap();
+        (colored_row + 1..18).any(|row| {
+            pane.parser.screen().cell(row, 0).is_some_and(|cell| {
+                cell.contents() == "/" && cell.fgcolor() == vt100::Color::Default && !cell.bold()
+            })
+        })
+    });
+    app.current().unwrap().connection.as_ref().unwrap().close();
+    wait(&mut app, |a| a.current().unwrap().connection.is_none());
+}
+
 fn wait(app: &mut App, condition: impl Fn(&App) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {

@@ -38,6 +38,12 @@ int psh_out(psx_session_t *session, const char *fmt, ...)
 int psh_err(psx_session_t *session, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
 
+/* Caller frees the printable UTF-8 text; width counts terminal cells. */
+char *psh_display_text(const char *text, bool quote, size_t *width);
+const char *psh_command_usage(const char *name);
+/* -1: run command; otherwise the help/error status has already been emitted. */
+int psh_no_arguments(psx_session_t *session, int argc, char **argv);
+
 /* --- shell instance ----------------------------------------------------- */
 
 typedef struct psx_shell psx_shell_t;

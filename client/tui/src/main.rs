@@ -8,8 +8,10 @@ use crossterm::{
 };
 use psxterm_tui::{
     app::{App, Overlay},
+    colors::OutputColors,
     config::{self, Config, Console},
     i18n::{self, Language, tr, trf},
+    repaint::Repaint,
     ui,
 };
 use std::{
@@ -37,13 +39,15 @@ struct Args {
     name: Option<String>,
     #[arg(long, global = true, value_enum)]
     lang: Option<Language>,
+    #[arg(long, global = true, value_enum)]
+    output_colors: Option<OutputColors>,
     #[arg(long, global = true)]
     config: Option<PathBuf>,
     #[arg(long)]
     demo: bool,
     #[arg(long)]
     snapshot: Option<PathBuf>,
-    #[arg(long,default_value="tabs",value_parser=["tabs","split","palette","consoles","form"])]
+    #[arg(long,default_value="tabs",value_parser=["tabs","split","palette","consoles","form","search","export"])]
     snapshot_view: String,
     #[arg(long,default_value_t=140,value_parser=clap::value_parser!(u16).range(40..=240))]
     snapshot_cols: u16,
@@ -97,6 +101,9 @@ fn run() -> Result<()> {
     };
     if let Some(lang) = args.lang {
         config.language = lang;
+    }
+    if let Some(colors) = args.output_colors {
+        config.output_colors = colors;
     }
     i18n::set(config.language);
     let mut selected = config.consoles.first().map(|c| c.id);
@@ -179,12 +186,22 @@ fn run() -> Result<()> {
             "split" => app.split = true,
             "palette" => {
                 app.overlay = Overlay::Palette {
-                    query: String::new(),
+                    query: psxterm_tui::input::Input::new(String::new(), 100),
                     selected: 0,
                 }
             }
             "consoles" => app.action("console"),
             "form" => app.action("add"),
+            "export" => app.action("export"),
+            "search" => {
+                let mut preview = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+                    args.snapshot_cols,
+                    args.snapshot_rows,
+                ))?;
+                preview.draw(|f| ui::draw(f, &mut app))?;
+                app.action("search");
+                app.handle(event::Event::Paste("projects".into()));
+            }
             _ => {}
         }
         psxterm_tui::snapshot::save_size(&mut app, &path, args.snapshot_cols, args.snapshot_rows)?;
@@ -195,11 +212,44 @@ fn run() -> Result<()> {
     let guard = TerminalGuard;
     execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     let result = (|| -> Result<()> {
+        let mut repaint = Repaint::new(Instant::now());
         while !app.quit {
-            app.poll();
-            terminal.draw(|f| ui::draw(f, &mut app))?;
-            if event::poll(Duration::from_millis(33))? {
-                app.handle(event::read()?);
+            if app.poll() {
+                repaint.request();
+            }
+            let now = Instant::now();
+            if repaint.ready(now) {
+                terminal.draw(|f| ui::draw(f, &mut app))?;
+                repaint.rendered(Instant::now());
+            }
+            if event::poll(repaint.wait_for_work(Instant::now(), app.work_pending()))? {
+                // Coalesce bursts of keyboard, paste, mouse and resize events.
+                // A bound ensures network polling is never starved by input.
+                for _ in 0..64 {
+                    let input = event::read()?;
+                    let geometry_change = matches!(
+                        &input,
+                        event::Event::Resize(..)
+                            | event::Event::Mouse(event::MouseEvent {
+                                kind: event::MouseEventKind::Down(_),
+                                ..
+                            })
+                    );
+                    if !matches!(&input, event::Event::Key(k) if k.kind == event::KeyEventKind::Release)
+                    {
+                        repaint.request();
+                    }
+                    app.handle(input);
+                    if geometry_change {
+                        // Clicks can open a dialog with new mouse targets.
+                        // Render it before consuming the next queued click.
+                        repaint.urgent(Instant::now());
+                        break;
+                    }
+                    if app.quit || !event::poll(Duration::ZERO)? {
+                        break;
+                    }
+                }
             }
         }
         Ok(())
@@ -228,6 +278,7 @@ fn demo_config() -> Config {
     Config {
         version: 1,
         language: Language::En,
+        output_colors: OutputColors::default(),
         consoles: vec![
             Console {
                 id: 1,

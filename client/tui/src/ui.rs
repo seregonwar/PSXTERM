@@ -70,24 +70,32 @@ fn fit(text: &str, width: u16) -> String {
     result.push('…');
     result
 }
-fn fit_tail(text: &str, width: u16) -> String {
-    if text.width() <= width as usize {
-        return text.into();
+fn input_row(f: &mut Frame, area: Rect, input: &crate::input::Input, masked: bool, active: bool) {
+    let (text, cursor) = if masked {
+        input.masked_view(area.width)
+    } else {
+        input.view(area.width)
+    };
+    f.render_widget(
+        Paragraph::new(text).style(Style::default().fg(FG).bg(BORDER)),
+        area,
+    );
+    if active && area.width > 0 && area.height > 0 {
+        f.set_cursor_position((area.x + cursor, area.y));
     }
-    if width == 0 {
-        return String::new();
-    }
-    let start = text
-        .char_indices()
-        .find(|(n, _)| text[*n..].width() < width as usize)
-        .map(|(n, _)| n)
-        .unwrap_or(text.len());
-    format!("…{}", &text[start..])
+}
+fn after_marker(area: Rect) -> Rect {
+    let offset = 2.min(area.width);
+    Rect::new(area.x + offset, area.y, area.width - offset, area.height)
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    if app.screen != (area.width, area.height) {
+        app.sel = None;
+    }
     app.hits.clear();
+    app.rendered_panes.clear();
     app.screen = (area.width, area.height);
     f.render_widget(Block::default().style(Style::default().bg(BG).fg(FG)), area);
     if area.width < 55 || area.height < 18 {
@@ -121,8 +129,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     paragraph(
         f,
         row(vertical[1], 0),
-        if area.width >= 100 {
+        if area.width >= 120 {
+            tr("ui.footer_full")
+        } else if area.width >= 100 {
             tr("ui.footer")
+        } else if area.width >= 80 {
+            tr("ui.footer_medium")
         } else {
             tr("ui.compact")
         },
@@ -149,7 +161,51 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         sidebar(f, app, drawer);
     }
     highlight_selection(f, app);
+    highlight_search(f, app);
     overlay(f, app);
+}
+
+fn highlight_search(f: &mut Frame, app: &App) {
+    let Overlay::Search(search) = &app.overlay else {
+        return;
+    };
+    let Some(pane) = app.panes.iter().find(|p| p.id == search.pane) else {
+        return;
+    };
+    if !search.is_current(pane.parser.screen(), pane.output_revision) {
+        return;
+    }
+    let Some(found) = search.current() else {
+        return;
+    };
+    let Some(rect) = app.pane_rect(search.pane) else {
+        return;
+    };
+    let offset = pane.parser.screen().scrollback();
+    for y in rect.y..rect.bottom() {
+        let line = offset + usize::from(rect.bottom() - y - 1);
+        if line > found.start.line || line < found.end.line {
+            continue;
+        }
+        let start = if line == found.start.line {
+            found.start.column
+        } else {
+            0
+        };
+        let end = if line == found.end.line {
+            found.end.column
+        } else {
+            rect.width.saturating_sub(1)
+        };
+        for x in start..=end.min(rect.width.saturating_sub(1)) {
+            let cell = &mut f.buffer_mut()[(rect.x + x, y)];
+            cell.fg = PANEL;
+            cell.bg = Color::Rgb(238, 207, 118);
+            cell.modifier
+                .remove(Modifier::DIM | Modifier::REVERSED | Modifier::HIDDEN);
+            cell.modifier.insert(Modifier::BOLD);
+        }
+    }
 }
 
 /// Paint the current text selection in reverse video.
@@ -169,12 +225,13 @@ fn highlight_selection(f: &mut Frame, app: &App) {
     let ((c0, l0), (c1, l1)) = sel.bounds();
     let buffer = f.buffer_mut();
 
-    for line in l0..=l1 {
-        let Some(row) = app.screen_row_for_line(sel.pane, rect, line) else {
-            continue;
-        };
-
-        if row >= area.height {
+    let Some(pane) = app.panes.iter().find(|p| p.id == sel.pane) else {
+        return;
+    };
+    let offset = pane.parser.screen().scrollback() as u16;
+    for row in rect.y..rect.bottom().min(area.bottom()) {
+        let line = offset.saturating_add(rect.bottom() - row - 1);
+        if line > l0 || line < l1 {
             continue;
         }
 
@@ -185,7 +242,7 @@ fn highlight_selection(f: &mut Frame, app: &App) {
             rect.x + rect.width.saturating_sub(1)
         };
 
-        for x in start..=end.min(area.width.saturating_sub(1)) {
+        for x in start.max(rect.x)..=end.min(rect.right() - 1).min(area.right() - 1) {
             buffer[(x, row)].modifier |= Modifier::REVERSED;
         }
     }
@@ -294,10 +351,28 @@ fn workspace(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         format!("  {mode}")
     };
+    let unread = app.unread_count(None);
+    let header_area = if unread > 0 {
+        let badge = format!(" ● {unread} ");
+        let sections =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(badge.width() as u16)])
+                .split(parts[0]);
+        f.render_widget(
+            Paragraph::new(badge).style(Style::default().fg(FG).bg(BORDER)),
+            sections[1],
+        );
+        hit(app, sections[1], Hit::Action("unread".into()));
+        sections[0]
+    } else {
+        parts[0]
+    };
     paragraph(
         f,
-        parts[0],
-        format!("{header}{}", if app.demo { " · DEMO" } else { "" }),
+        header_area,
+        fit(
+            &format!("{header}{}", if app.demo { " · DEMO" } else { "" }),
+            header_area.width,
+        ),
         MUTED,
     );
     let ids = app.visible_ids();
@@ -417,6 +492,7 @@ fn workspace(f: &mut Frame, app: &mut App, area: Rect) {
     let regions = pane_regions(parts[2], visible.len());
     let allow_cursor = matches!(app.overlay, Overlay::None) && !app.sidebar_focus;
     for (id, r) in visible.iter().zip(regions) {
+        app.rendered_panes.push(*id);
         let is_active = Some(*id) == app.active;
         let p = app.panes.iter_mut().find(|p| p.id == *id).unwrap();
         let scroll = p.parser.screen().scrollback();
@@ -445,8 +521,15 @@ fn workspace(f: &mut Frame, app: &mut App, area: Rect) {
         )));
         let inner = b.inner(r);
         f.render_widget(b, r);
+        if app.sel.is_some_and(|sel| sel.pane == *id) && p.dimensions != (inner.height, inner.width)
+        {
+            app.sel = None;
+        }
         p.resize(inner.height, inner.width);
-        f.render_widget(ScreenWidget(p.parser.screen()), inner);
+        f.render_widget(
+            ScreenWidget(p.parser.screen()).with_colors(app.config.output_colors),
+            inner,
+        );
         if is_active
             && allow_cursor
             && scroll == 0
@@ -544,6 +627,18 @@ fn welcome(f: &mut Frame, area: Rect) {
 }
 
 pub struct ScreenWidget<'a>(pub &'a vt100::Screen);
+pub struct ColoredScreenWidget<'a> {
+    screen: &'a vt100::Screen,
+    colors: crate::colors::OutputColors,
+}
+impl<'a> ScreenWidget<'a> {
+    pub fn with_colors(self, colors: crate::colors::OutputColors) -> ColoredScreenWidget<'a> {
+        ColoredScreenWidget {
+            screen: self.0,
+            colors,
+        }
+    }
+}
 fn color(c: vt100::Color, default: Color) -> Color {
     match c {
         vt100::Color::Default => default,
@@ -553,14 +648,23 @@ fn color(c: vt100::Color, default: Color) -> Color {
 }
 impl Widget for ScreenWidget<'_> {
     fn render(self, area: Rect, buffer: &mut Buffer) {
+        self.with_colors(crate::colors::OutputColors::Original)
+            .render(area, buffer);
+    }
+}
+impl Widget for ColoredScreenWidget<'_> {
+    fn render(self, area: Rect, buffer: &mut Buffer) {
         for y in 0..area.height {
             for x in 0..area.width {
-                if let Some(c) = self.0.cell(y, x) {
+                if let Some(c) = self.screen.cell(y, x) {
                     if c.is_wide_continuation() {
                         continue;
                     }
                     let mut style = Style::default()
-                        .fg(color(c.fgcolor(), FG))
+                        .fg(match c.fgcolor() {
+                            vt100::Color::Idx(index) => self.colors.foreground(index),
+                            other => color(other, FG),
+                        })
                         .bg(color(c.bgcolor(), PANEL));
                     for (on, modifier) in [
                         (c.bold(), Modifier::BOLD),
@@ -625,6 +729,91 @@ fn overlay(f: &mut Frame, app: &mut App) {
     }
     app.hits.clear();
     match &app.overlay {
+        Overlay::Search(search) => {
+            let area = f.area();
+            let bar = Rect::new(
+                area.x,
+                area.bottom().saturating_sub(2),
+                area.width,
+                2.min(area.height),
+            );
+            f.render_widget(Clear, bar);
+            f.render_widget(Block::default().style(Style::default().bg(BG).fg(FG)), bar);
+            let top = Layout::horizontal([
+                Constraint::Length(16.min(bar.width / 3)),
+                Constraint::Min(1),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(6),
+                Constraint::Length(3),
+            ])
+            .split(row(bar, 0));
+            paragraph(f, top[0], fit(&tr("search.label"), top[0].width), FG);
+            let (query, cursor) = search.query.view(top[1].width);
+            paragraph(
+                f,
+                top[1],
+                if search.query.is_empty() {
+                    fit(&tr("search.placeholder"), top[1].width)
+                } else {
+                    query.clone()
+                },
+                FG,
+            );
+            for (rect, label, target) in [
+                (top[2], " ↑ ", Hit::SearchStep(-1)),
+                (top[3], " ↓ ", Hit::SearchStep(1)),
+                (top[4], " ↻ F5 ", Hit::SearchRefresh),
+                (top[5], " × ", Hit::SearchClose),
+            ] {
+                f.render_widget(
+                    Paragraph::new(label).style(Style::default().bg(BORDER).fg(FG)),
+                    rect,
+                );
+                hit(app, rect, target);
+            }
+            hit(app, top[1], Hit::Input(0));
+            let Overlay::Search(search) = &app.overlay else {
+                return;
+            };
+            let current = app
+                .panes
+                .iter()
+                .find(|p| p.id == search.pane)
+                .is_some_and(|p| search.is_current(p.parser.screen(), p.output_revision));
+            let status = if !current {
+                tr("search.changed")
+            } else if search.query.is_empty() {
+                tr("search.hint")
+            } else if search.matches.is_empty() {
+                tr("search.none")
+            } else {
+                format!(
+                    "{}{} · {}",
+                    trf(
+                        "search.count",
+                        &[
+                            (search.selected + 1).to_string(),
+                            search.matches.len().to_string()
+                        ]
+                    ),
+                    if search.truncated {
+                        format!(" · {}", tr("search.limited"))
+                    } else {
+                        String::new()
+                    },
+                    tr(if bar.width < 100 {
+                        "search.navigation_compact"
+                    } else {
+                        "search.navigation"
+                    })
+                )
+            };
+            paragraph(f, row(bar, 1), fit(&status, bar.width), MUTED);
+            if top[1].width > 0 && top[1].height > 0 {
+                f.set_cursor_position((top[1].x + cursor, top[1].y));
+            }
+        }
         Overlay::Consoles { selected } => {
             let a = f.area();
             let offset = 3.min(a.height.saturating_sub(3));
@@ -645,7 +834,19 @@ fn overlay(f: &mut Frame, app: &mut App) {
                 .config
                 .consoles
                 .iter()
-                .map(|c| format!("{}  ·  {}", c.name, c.address()))
+                .map(|c| {
+                    let unread = app.unread_count(Some(c.id));
+                    format!(
+                        "{}{}  ·  {}",
+                        if unread > 0 {
+                            format!("● {unread}  ")
+                        } else {
+                            String::new()
+                        },
+                        c.name,
+                        c.address()
+                    )
+                })
                 .collect::<Vec<_>>();
             choices.push(tr("ui.add"));
             for (n, label) in choices.iter().enumerate().skip(start).take(avail) {
@@ -669,25 +870,31 @@ fn overlay(f: &mut Frame, app: &mut App) {
             paragraph(
                 f,
                 row(inner, inner.height.saturating_sub(1)),
-                tr("ui.modal_hint"),
+                tr(if app.unread_count(None) > 0 {
+                    "ui.unread_picker_hint"
+                } else {
+                    "ui.modal_hint"
+                }),
                 MUTED,
             );
         }
         Overlay::Palette { query, selected } => {
             let inner = modal(f, 80, 24, tr("ui.palette"));
-            paragraph(
-                f,
-                row(inner, 0),
-                format!(
-                    "› {}",
-                    if query.is_empty() {
-                        tr("ui.search")
-                    } else {
-                        query.clone()
-                    }
-                ),
-                FG,
-            );
+            let query_row = row(inner, 0);
+            paragraph(f, query_row, "› ", FG);
+            let input_area = after_marker(query_row);
+            input_row(f, input_area, query, false, true);
+            if query.is_empty() {
+                paragraph(
+                    f,
+                    input_area,
+                    fit(&tr("ui.search"), input_area.width),
+                    MUTED,
+                );
+            }
+            if input_area.width > 0 && input_area.height > 0 {
+                app.hits.push((input_area, Hit::Input(0)));
+            }
             let items = filtered(query);
             let avail = inner.height.saturating_sub(7) as usize;
             let start = selected.saturating_sub(avail.saturating_sub(1));
@@ -780,24 +987,19 @@ fn overlay(f: &mut Frame, app: &mut App) {
                 .enumerate()
             {
                 paragraph(f, row(inner, (i * 3) as u16), tr(key), MUTED);
-                let value = if i == 3 {
-                    "•".repeat(fields[i].chars().count())
-                } else {
-                    fields[i].clone()
-                };
                 let rr = row(inner, (i * 3 + 1) as u16);
-                let value = fit_tail(&value, rr.width.saturating_sub(3));
                 f.render_widget(
-                    Paragraph::new(format!(
-                        "{} {value}{}",
-                        if i == *field { "›" } else { " " },
-                        if i == *field { "▏" } else { "" }
-                    ))
-                    .style(Style::default().fg(FG).bg(BORDER)),
+                    Paragraph::new(if i == *field { "› " } else { "  " })
+                        .style(Style::default().fg(FG).bg(BORDER)),
                     rr,
                 );
+                input_row(f, after_marker(rr), &fields[i], i == 3, i == *field);
                 if rr.height > 0 {
                     app.hits.push((rr, Hit::Choice(i)));
+                    let input_area = after_marker(rr);
+                    if input_area.width > 0 {
+                        app.hits.push((input_area, Hit::Input(i)));
+                    }
                 }
             }
             paragraph(f, row(inner, 12), tr("form.token_hint"), MUTED);
@@ -826,9 +1028,109 @@ fn overlay(f: &mut Frame, app: &mut App) {
             );
             confirm_buttons(f, inner, &mut app.hits, true);
         }
+        Overlay::Export(dialog) => {
+            let inner = modal(f, 78, 16, tr("action.export"));
+            let compact = inner.height < 12;
+            paragraph(f, row(inner, 0), fit(&dialog.title, inner.width), FG);
+            if !compact {
+                paragraph(f, row(inner, 1), tr("export.description"), MUTED);
+                paragraph(
+                    f,
+                    row(inner, 2),
+                    tr("export.path"),
+                    if dialog.field == 0 { FG } else { MUTED },
+                );
+            }
+            let path_row = row(inner, if compact { 1 } else { 3 });
+            let (path, cursor) = dialog.path.view(path_row.width);
+            f.render_widget(
+                Paragraph::new(path.clone()).style(
+                    Style::default()
+                        .fg(FG)
+                        .bg(if dialog.field == 0 { BORDER } else { PANEL }),
+                ),
+                path_row,
+            );
+            if path_row.width > 0 && path_row.height > 0 {
+                app.hits.push((path_row, Hit::ExportField(0)));
+                if dialog.field == 0 {
+                    f.set_cursor_position((path_row.x + cursor, path_row.y));
+                }
+            }
+            if !compact {
+                paragraph(
+                    f,
+                    row(inner, 4),
+                    tr(if inner.width < 70 {
+                        "export.path_hint_compact"
+                    } else {
+                        "export.path_hint"
+                    }),
+                    MUTED,
+                );
+                paragraph(
+                    f,
+                    row(inner, 6),
+                    tr("export.scope"),
+                    if dialog.field == 1 { FG } else { MUTED },
+                );
+            }
+            for (n, scope) in [crate::export::Scope::History, crate::export::Scope::Visible]
+                .into_iter()
+                .enumerate()
+            {
+                let rect = row(inner, if compact { 2 + n as u16 } else { 7 + n as u16 });
+                f.render_widget(
+                    Paragraph::new(fit(
+                        &format!(
+                            "{} {}",
+                            if dialog.scope == scope { "●" } else { "○" },
+                            tr(scope.label())
+                        ),
+                        rect.width,
+                    ))
+                    .style(Style::default().fg(FG).bg(
+                        if dialog.field == 1 && dialog.scope == scope {
+                            BORDER
+                        } else {
+                            PANEL
+                        },
+                    )),
+                    rect,
+                );
+                if rect.width > 0 && rect.height > 0 {
+                    app.hits.push((rect, Hit::ExportScope(scope)));
+                }
+            }
+            if !compact {
+                f.render_widget(
+                    Paragraph::new(dialog.error.clone())
+                        .wrap(Wrap { trim: false })
+                        .style(Style::default().fg(FG)),
+                    Rect::new(inner.x, inner.y + 10, inner.width, 2),
+                );
+                paragraph(
+                    f,
+                    row(inner, inner.height.saturating_sub(2)),
+                    tr(if inner.width < 70 {
+                        "export.navigation_compact"
+                    } else {
+                        "export.navigation"
+                    }),
+                    MUTED,
+                );
+            }
+            confirm_buttons(f, inner, &mut app.hits, true);
+        }
         Overlay::Rename(text) => {
             let inner = modal(f, 55, 7, tr("action.rename"));
-            paragraph(f, row(inner, 1), format!("› {text}▏"), FG);
+            let name_row = row(inner, 1);
+            paragraph(f, name_row, "› ", FG);
+            input_row(f, after_marker(name_row), text, false, true);
+            let input_area = after_marker(name_row);
+            if input_area.width > 0 && input_area.height > 0 {
+                app.hits.push((input_area, Hit::Input(0)));
+            }
             confirm_buttons(f, inner, &mut app.hits, true);
         }
         Overlay::Text {
@@ -872,11 +1174,14 @@ fn overlay(f: &mut Frame, app: &mut App) {
                 Overlay::ConfirmQuit => "confirm.quit",
                 _ => "confirm.paste",
             };
-            let text = if let Overlay::ConfirmPaste(text) = &app.overlay {
+            let mut text = if let Overlay::ConfirmPaste(text) = &app.overlay {
                 trf(key, &[text.lines().count().to_string()])
             } else {
                 tr(key)
             };
+            if matches!(app.overlay, Overlay::ConfirmQuit) && app.export_pending() {
+                text.push_str(&format!("\n{}", tr("export.quit")));
+            }
             let inner = modal(f, 68, 9, tr("app.title"));
             f.render_widget(
                 Paragraph::new(text)
@@ -909,6 +1214,7 @@ mod tests {
             Config {
                 version: 1,
                 language: Language::En,
+                output_colors: Default::default(),
                 consoles: vec![Console {
                     id: 1,
                     name: "Studio".into(),
@@ -931,7 +1237,7 @@ mod tests {
             a.overlay = Overlay::Consoles { selected: 1 };
             t.draw(|f| draw(f, &mut a)).unwrap();
             a.overlay = Overlay::Palette {
-                query: "files".into(),
+                query: crate::input::Input::new("files".into(), 100),
                 selected: 0,
             };
             t.draw(|f| draw(f, &mut a)).unwrap();
@@ -954,5 +1260,21 @@ mod tests {
                 .modifier
                 .contains(Modifier::BOLD | Modifier::UNDERLINED)
         );
+    }
+    #[test]
+    fn readable_palette_only_changes_basic_foregrounds() {
+        let mut parser = vt100::Parser::new(1, 10, 0);
+        parser.process(b"\x1b[34;41mA\x1b[38;5;200mB\x1b[38;2;1;2;3mC");
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 10, 1));
+        ScreenWidget(parser.screen())
+            .with_colors(crate::colors::OutputColors::Readable)
+            .render(buffer.area, &mut buffer);
+        assert_eq!(
+            buffer[(0, 0)].fg,
+            crate::colors::OutputColors::Readable.foreground(4)
+        );
+        assert_eq!(buffer[(0, 0)].bg, Color::Indexed(1));
+        assert_eq!(buffer[(1, 0)].fg, Color::Indexed(200));
+        assert_eq!(buffer[(2, 0)].fg, Color::Rgb(1, 2, 3));
     }
 }
