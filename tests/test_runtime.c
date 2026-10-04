@@ -19,6 +19,41 @@
 #include "psxterm/runtime.h"
 
 static void
+test_long_search_path(void)
+{
+    pid_t pid = fork();
+    int status = 0;
+    PSX_CHECK(pid >= 0);
+    if(pid == 0) {
+        /* Fork before runtime initialization to test a separate long base. */
+        char base[497];
+        char expected[1024];
+        psx_runtime_env_t table[16];
+        memset(base, 'a', sizeof(base) - 1);
+        for(size_t i = 0; i < sizeof(base) - 1; i += 64)
+            base[i] = '/';
+        base[sizeof(base) - 1] = '\0';
+        if(setenv("PSXTERM_RUNTIME_BASE", base, 1) != 0)
+            _exit(2);
+        int length = snprintf(expected, sizeof(expected), "%s/runtime/bin:%s",
+                              base, psx_platform_bin_dir());
+        if(length < 0 || (size_t)length >= sizeof(expected))
+            _exit(2);
+        size_t count = psx_runtime_env_table(table, 16);
+        for(size_t i = 0; i < count; i++) {
+            if(strcmp(table[i].key, "PATH") == 0)
+                _exit(strcmp(table[i].value, expected) == 0 ? 0 : 1);
+        }
+        _exit(3);
+    }
+    if(pid > 0) {
+        PSX_CHECK_EQ(waitpid(pid, &status, 0), pid);
+        PSX_CHECK(WIFEXITED(status));
+        PSX_CHECK_EQ(WEXITSTATUS(status), 0);
+    }
+}
+
+static void
 test_paths(void)
 {
     const char *root = psx_runtime_root();
@@ -304,6 +339,7 @@ main(void)
     }
     setenv("PSXTERM_RUNTIME_BASE", base, 1);
 
+    test_long_search_path();
     test_paths();
     test_environment();
     test_prepare_rejects_files();

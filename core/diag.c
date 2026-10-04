@@ -1050,6 +1050,22 @@ out:
     return rc;
 }
 
+/* Search details have a fixed display budget; make shortening explicit. */
+static void
+diag_search_append(char *out, size_t capacity, const char *text)
+{
+    if(capacity == 0)
+        return;
+    size_t used = strlen(out);
+    size_t length = strlen(text);
+    size_t available = capacity - used - 1;
+    size_t copied = length < available ? length : available;
+    memcpy(out + used, text, copied);
+    out[used + copied] = '\0';
+    if(length > available && capacity >= 4)
+        memcpy(out + capacity - 4, "...", 4);
+}
+
 static bool
 diag_locate_cli_test(char *out, size_t out_cap, char *searched, size_t searched_cap)
 {
@@ -1062,8 +1078,10 @@ diag_locate_cli_test(char *out, size_t out_cap, char *searched, size_t searched_
     searched[0] = '\0';
 
     if(bin && *bin) {
-        snprintf(searched + strlen(searched), searched_cap - strlen(searched),
-                 "%s/cli_test.elf, %s/cli_test, ", bin, bin);
+        diag_search_append(searched, searched_cap, bin);
+        diag_search_append(searched, searched_cap, "/cli_test.elf, ");
+        diag_search_append(searched, searched_cap, bin);
+        diag_search_append(searched, searched_cap, "/cli_test, ");
 
         if(psx_path_join(candidate, sizeof(candidate), bin, "cli_test.elf") == 0 &&
            access(candidate, F_OK) == 0) {
@@ -1088,8 +1106,10 @@ diag_locate_cli_test(char *out, size_t out_cap, char *searched, size_t searched_
         exe[n] = '\0';
         if((slash = strrchr(exe, '/'))) {
             *slash = '\0';
-            snprintf(searched + strlen(searched), searched_cap - strlen(searched),
-                     "%s/cli_test, %s/cli_test.elf, ", exe, exe);
+            diag_search_append(searched, searched_cap, exe);
+            diag_search_append(searched, searched_cap, "/cli_test, ");
+            diag_search_append(searched, searched_cap, exe);
+            diag_search_append(searched, searched_cap, "/cli_test.elf, ");
 
             if(psx_path_join(candidate, sizeof(candidate), exe, "cli_test") == 0 &&
                access(candidate, F_OK) == 0) {
@@ -1104,8 +1124,7 @@ diag_locate_cli_test(char *out, size_t out_cap, char *searched, size_t searched_
         }
     }
 
-    snprintf(searched + strlen(searched), searched_cap - strlen(searched),
-             "./cli_test, ./cli_test.elf");
+    diag_search_append(searched, searched_cap, "./cli_test, ./cli_test.elf");
 
     if(access("cli_test", F_OK) == 0) {
         snprintf(out, out_cap, "%s", "cli_test");

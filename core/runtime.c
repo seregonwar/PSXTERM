@@ -185,7 +185,8 @@ psx_runtime_env_table(psx_runtime_env_t *out, size_t max)
 {
     static char home_config[PSX_PATH_MAX];
     static char data_home[PSX_PATH_MAX];
-    static char path_value[PSX_PATH_MAX];
+    /* Two directory paths plus the search-list separator and terminator. */
+    static char path_value[2 * PSX_PATH_MAX];
     size_t written = 0;
 
     runtime_init();
@@ -204,8 +205,13 @@ psx_runtime_env_table(psx_runtime_env_t *out, size_t max)
      * the daemon's own bin directory. Joining them would have produced
      * ".../bin//data/psxterm/runtime/bin" (seen on hardware).
      */
-    snprintf(path_value, sizeof(path_value), "%s:%s",
-             psx_runtime_dir(PSX_RUNTIME_DIR_BIN), psx_platform_bin_dir());
+    int path_length = snprintf(path_value, sizeof(path_value), "%s:%s",
+                               psx_runtime_dir(PSX_RUNTIME_DIR_BIN),
+                               psx_platform_bin_dir());
+    if(path_length < 0 || (size_t)path_length >= sizeof(path_value)) {
+        errno = ENAMETOOLONG;
+        return 0;
+    }
 
 #define ENTRY(key_, value_)                                                   \
     do {                                                                      \

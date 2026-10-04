@@ -14,6 +14,21 @@
 #include <termios.h>
 #include <unistd.h>
 
+static int
+write_all(int fd, const char *data, size_t length)
+{
+    while(length > 0) {
+        ssize_t written = write(fd, data, length);
+        if(written < 0 && errno == EINTR)
+            continue;
+        if(written <= 0)
+            return -1;
+        data += written;
+        length -= (size_t)written;
+    }
+    return 0;
+}
+
 /*
  * Breadcrumbs on the filesystem, written from inside the payload.
  *
@@ -37,8 +52,11 @@ marker(const char *text)
                       O_WRONLY | O_CREAT | O_APPEND, 0644);
 
         if(fd >= 0) {
-            (void)write(fd, text, strlen(text));
-            (void)write(fd, "\n", 1);
+            if(write_all(fd, text, strlen(text)) < 0 ||
+               write_all(fd, "\n", 1) < 0) {
+                close(fd);
+                return;
+            }
             close(fd);
         }
     }
@@ -71,7 +89,8 @@ main(int argc, char **argv)
 
     /* Raw markers on the descriptors, so a run that hangs still shows how far
      * it got even when libc stdio is the thing under suspicion. */
-    (void)write(STDOUT_FILENO, "CLI-TEST-START\n", 15);
+    if(write_all(STDOUT_FILENO, "CLI-TEST-START\n", 15) < 0)
+        marker("start: write stdout failed");
 
     printf("cli_test: argc=%d\n", argc);
     for(int i = 0; i < argc; i++) {
@@ -136,7 +155,15 @@ main(int argc, char **argv)
         marker(note);
     }
 
-    (void)write(STDERR_FILENO, "matrix: write stderr\n", 21);
+    {
+        ssize_t wrote = write(STDERR_FILENO, "matrix: write stderr\n", 21);
+        int saved = errno;
+        char note[128];
+
+        snprintf(note, sizeof(note), "matrix: write(2)=%ld errno=%d",
+                 (long)wrote, wrote < 0 ? saved : 0);
+        marker(note);
+    }
 
     printf("matrix: printf stdout\n");
     fflush(stdout);

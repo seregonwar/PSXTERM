@@ -96,7 +96,10 @@ test_posix_probe_without_linux_ioctl(void)
         if(output) {
             psx_tty_probe_print(&probe, output);
             rewind(output);
-            fread(text, 1, sizeof(text) - 1, output);
+            size_t length = fread(text, 1, sizeof(text) - 1, output);
+            PSX_CHECK(length > 0);
+            PSX_CHECK_EQ(ferror(output), 0);
+            text[length] = '\0';
             fclose(output);
             PSX_CHECK(strstr(text, "FreeBSDPTY backend ...... available") != NULL);
         }

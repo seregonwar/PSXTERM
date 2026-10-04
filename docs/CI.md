@@ -9,7 +9,7 @@ adapted to PSXTerm's C host tools and Rust/Ratatui workspace client.
 | Workflow | Trigger | Result |
 |---|---|---|
 | Verify | PR, main push, manual | Existing client/host tests, sanitizers, and SDK build checks |
-| Build | Changes to implementation/build files | Existing host build and tests |
+| Build | Changes to implementation/build files | Debug and Release host builds and tests on Linux/macOS |
 | Docs Check | Markdown changes | Relative links and tracked-file checks |
 | Locale Check | Client resource changes, manual | Translation keys, types, duplicates, and placeholder parity |
 | GitHub Configuration | GitHub/tool changes, manual | Actionlint and nightly/locale tool tests |
@@ -25,6 +25,15 @@ Verify and Nightly use Rust 1.88.0, the client's declared minimum version,
 including rustfmt and Clippy. SDK jobs export an absolute `PS4_PAYLOAD_SDK` or
 `PS5_PAYLOAD_SDK` path for compiler/linker wrappers as well as the CMake
 toolchain. Keep these environment variables when reproducing an SDK build.
+
+Build checks both optimization profiles before Nightly packages Release tools.
+To reproduce Linux Release diagnostics with fortified libc checks locally:
+
+```console
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-D_FORTIFY_SOURCE=3
+cmake --build build-release --parallel
+ctest --test-dir build-release --output-on-failure
+```
 
 ## Nightly downloads
 
