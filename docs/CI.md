@@ -13,7 +13,7 @@ adapted to PSXTerm's C host tools and Rust/Ratatui workspace client.
 | Docs Check | Markdown changes | Relative links and tracked-file checks |
 | Locale Check | Client resource changes, manual | Translation keys, types, duplicates, and placeholder parity |
 | GitHub Configuration | GitHub/tool changes, manual | Actionlint and nightly/locale tool tests |
-| Nightly | Daily schedule or manual | Tested desktop archives and immutable prerelease |
+| Nightly | Daily schedule or manual | Desktop archives, PS4/PS5 ELF payloads, and immutable prerelease |
 | Release | `v*` tag or manual | Existing stable release workflow |
 
 Dependabot proposes weekly updates to Cargo dependencies and GitHub Actions.
@@ -46,20 +46,31 @@ Every run resolves `main` once and all matrix jobs check out that full SHA.
 Tags follow `nightly-YYYYMMDD-g<7-character-SHA>-r<run-ID>`. Nightlies are
 prereleases, do not replace stable Latest, and never overwrite published assets.
 They appear in [Releases](https://github.com/seregonwar/PSXTERM/releases) after
-all three desktop builds and required tests succeed.
+all three desktop builds, both console builds, and required tests succeed.
 
 | Archive target | Contents |
 |---|---|
 | `windows-x86_64.zip` | `psxterm-tui.exe`, docs, license, build metadata |
 | `linux-x86_64.tar.gz` | Workspace client, native host daemon/CLI/probe/test tool, docs, license, metadata |
 | `macos-arm64.tar.gz` | Workspace client, native host daemon/CLI/probe/test tool, docs, license, metadata |
+| `ps4.tar.gz` | PS4 daemon/probe ELFs, execution wrapper, CLI/network probes, docs, license, SDK metadata |
+| `ps5.tar.gz` | PS5 daemon/probe ELFs, execution wrapper, CLI/network/process probes, docs, license, SDK metadata |
 
-These nightly archives contain desktop binaries. The existing tagged Release
-workflow handles console artifacts separately. Nightly tests do not validate
-execution on PS4/PS5 hardware. Archives are unsigned development builds.
+The release also offers `psxtermd-ps4.elf` and `psxtermd-ps5.elf` as direct
+downloads. The archives include `cli_test.elf`, `exec_wrapper.elf`, `hello.elf`,
+`netprobe.elf`, and `pslist.elf` on PS5, plus any optional ELF tools built.
+
+Each console job downloads its SDK on demand from the latest release of
+`ps4-payload-dev/sdk` or `ps5-payload-dev/sdk`, resolves that release tag before
+downloading, and records the SDK repository, version and ZIP SHA256 in
+`BUILD_INFO.json`. The SDK is not committed or bundled. LLVM 18 and the SDK's
+Orbis/Prospero toolchain compile Release payloads from the same source SHA as
+the desktop builds. Packaging rejects missing tools and invalid ELF headers.
+Nightly tests do not validate execution on PS4/PS5 hardware. Archives are
+unsigned development builds.
 
 Each archive includes `BUILD_INFO.json` with the source commit, target, channel,
-and binary list. `SHA256SUMS.txt` lists every archive. On Linux:
+and binary list. `SHA256SUMS.txt` lists every archive and standalone ELF. On Linux:
 
 ```console
 sha256sum -c SHA256SUMS.txt
@@ -67,7 +78,7 @@ sha256sum -c SHA256SUMS.txt
 
 On macOS use `shasum -a 256 -c SHA256SUMS.txt`. On Windows use
 `Get-FileHash <archive.zip> -Algorithm SHA256` and compare with the manifest.
-Download all three archives for a complete manifest check, or select the line
+Download all five archives and both standalone ELFs for a complete manifest check, or select the line
 for the archive you downloaded.
 
 The Actions run also keeps downloadable packages for 14 days and native terminal
@@ -87,7 +98,7 @@ actionlint -shellcheck= -pyflakes=
 
 Tests cover summer/winter schedules and transitions, duplicate scheduled builds,
 manual identities, OS/architecture mismatch, archive contents, executable modes,
-commit provenance, checksums, and malformed translation resources.
+commit/SDK provenance, console ELF validation, checksums, and malformed translation resources.
 
 The terminal test helpers cover asynchronous completion across quiet redraw
 intervals, missing results, dialog dismissal, idle drains, and early client exit.

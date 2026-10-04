@@ -224,7 +224,7 @@ expose the daemon to untrusted networks while authentication is disabled.
 
 Use the [contribution guide](CONTRIBUTING.md) for client/host checks and translation
 changes. Issue forms cover bugs, console crashes, features, documentation, and
-localization. See [CI and nightly downloads](docs/CI.md) for desktop development
+localization. See [CI and nightly downloads](docs/CI.md) for desktop and PS4/PS5 development
 builds, supported platforms, commit metadata, and SHA-256 checksums.
 
 ## License

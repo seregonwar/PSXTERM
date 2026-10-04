@@ -119,9 +119,89 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  payloads:
+    name: Console payloads (${{ matrix.platform }})
+    needs: preflight
+    if: needs.preflight.outputs.should_run == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ps4
+            sdk_repo: ps4-payload-dev/sdk
+            sdk_asset: ps4-payload-sdk.zip
+            toolchain: orbis.cmake
+          - platform: ps5
+            sdk_repo: ps5-payload-dev/sdk
+            sdk_asset: ps5-payload-sdk.zip
+            toolchain: prospero.cmake
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install LLVM 18 and SDK extraction tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 llvm-18 llvm-18-dev unzip
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+      - name: Resolve and download payload SDK on demand
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SDK_REPO: ${{ matrix.sdk_repo }}
+          SDK_ASSET: ${{ matrix.sdk_asset }}
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        run: |
+          set -euo pipefail
+          sdk_version="$(gh api "repos/$SDK_REPO/releases/latest" --jq .tag_name)"
+          gh release download "$sdk_version" --repo "$SDK_REPO" --pattern "$SDK_ASSET" --dir sdk-download
+          sdk_archive="$PWD/sdk-download/$SDK_ASSET"
+          sdk_checksum="$(sha256sum "$sdk_archive" | cut -d ' ' -f1)"
+          unzip -q "$sdk_archive" -d sdk
+          mapfile -t sdk_roots < <(find "$PWD/sdk" -mindepth 1 -maxdepth 1 -type d)
+          test "${#sdk_roots[@]}" -eq 1
+          sdk_dir="${sdk_roots[0]}"
+          test -f "$sdk_dir/toolchain/$TOOLCHAIN"
+          echo "SDK_VERSION=$sdk_version" >> "$GITHUB_ENV"
+          echo "SDK_SHA256=$sdk_checksum" >> "$GITHUB_ENV"
+          echo "SDK_DIR=$sdk_dir" >> "$GITHUB_ENV"
+          echo "PS4_PAYLOAD_SDK=$sdk_dir" >> "$GITHUB_ENV"
+          echo "PS5_PAYLOAD_SDK=$sdk_dir" >> "$GITHUB_ENV"
+      - name: Compile console ELF payloads
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-nightly-${{ matrix.platform }} -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$SDK_DIR/toolchain/${{ matrix.toolchain }}"
+          cmake --build build-nightly-${{ matrix.platform }} --parallel
+      - name: Package and validate console payloads
+        env:
+          NIGHTLY_TAG: ${{ needs.preflight.outputs.tag }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.sha }}
+          PACKAGE_TARGET: ${{ matrix.platform }}
+          SDK_REPO: ${{ matrix.sdk_repo }}
+        run: |
+          set -euo pipefail
+          python tools/nightly.py package --target "$PACKAGE_TARGET" --tag "$NIGHTLY_TAG" --sha "$SOURCE_SHA" \
+            --sdk-repo "$SDK_REPO" --sdk-version "$SDK_VERSION" --sdk-sha256 "$SDK_SHA256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nightly-package-${{ matrix.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/*.elf
+            dist/SHA256SUMS-*.txt
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
     name: Publish immutable prerelease
-    needs: [preflight, desktop]
+    needs: [preflight, desktop, payloads]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -139,12 +219,14 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          for target in linux-x86_64 windows-x86_64 macos-arm64; do
+          for target in linux-x86_64 windows-x86_64 macos-arm64 ps4 ps5; do
             sha256sum -c "SHA256SUMS-$target.txt"
             extension=tar.gz
             if [ "$target" = windows-x86_64 ]; then extension=zip; fi
             test -f "psxterm-$NIGHTLY_TAG-$target.$extension"
           done
+          test -s psxtermd-ps4.elf
+          test -s psxtermd-ps5.elf
           cat SHA256SUMS-*.txt | sort -k2 > SHA256SUMS.txt
       - name: Publish snapshot without replacing stable Latest
         env:
@@ -160,10 +242,10 @@ jobs:
             exit 0
           fi
           printf '%s\n\n%s\n\n%s\n\n%s\n' \
-            'Development snapshot of the PSXTerm workspace client and host tools.' \
+            'Development snapshot of the PSXTerm workspace client, host tools and PS4/PS5 ELF payloads.' \
             "Commit: $SOURCE_SHA" \
             "Build: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            'Windows includes the workspace client. Linux and macOS also include host daemon/CLI tools. Hardware execution is not validated by this workflow. Check SHA256SUMS.txt before use.' > nightly-notes.md
-          gh release create "$NIGHTLY_TAG" dist/*.tar.gz dist/*.zip dist/SHA256SUMS.txt \
+            'Windows includes the workspace client. Linux and macOS also include host daemon/CLI tools. PS4/PS5 include standalone daemon ELFs and archives of console tools with SDK provenance. Hardware execution is not validated by this workflow. Check SHA256SUMS.txt before use.' > nightly-notes.md
+          gh release create "$NIGHTLY_TAG" dist/*.tar.gz dist/*.zip dist/*.elf dist/SHA256SUMS.txt \
             --target "$SOURCE_SHA" --title "PSXTerm $NIGHTLY_TAG" \
             --prerelease --latest=false --notes-file nightly-notes.md

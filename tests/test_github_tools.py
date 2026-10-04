@@ -50,6 +50,81 @@ class NightlyIdentityTests(unittest.TestCase):
 
 
 class NightlyPackageTests(unittest.TestCase):
+    def console_fixture(self, root, target):
+        build = root / f"build-nightly-{target}"
+        build.mkdir()
+        header = bytearray(64)
+        header[:6] = b"\x7fELF\x02\x01"
+        header[16:18] = (3).to_bytes(2, "little")
+        header[18:20] = (62).to_bytes(2, "little")
+        names = ["psxtermd", "psxterm-ttyprobe", "cli_test.elf",
+                 "exec_wrapper.elf", "hello.elf", "netprobe.elf"]
+        if target == "ps5":
+            names.append("pslist.elf")
+        for name in names:
+            (build / name).write_bytes(header + name.encode())
+        (root / "LICENSE").write_text("license", encoding="utf-8")
+        (root / "README.md").write_text("guide", encoding="utf-8")
+        (root / "docs").mkdir()
+        (root / "docs/CI.md").write_text("console docs", encoding="utf-8")
+        return {"repository": f"{target}-payload-dev/sdk", "version": "v1.0",
+                "sha256": "a" * 64}
+
+    def test_console_archives_and_direct_elf_have_matching_provenance_and_checksums(self):
+        for target in ("ps4", "ps5"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                sdk = self.console_fixture(root, target)
+                output = root / "dist"
+                with patch("nightly.platform.system", return_value="Linux"), patch("nightly.platform.machine", return_value="x86_64"):
+                    archive = nightly.package(root, output, target, TAG, SHA, sdk)
+                prefix = f"psxterm-{TAG}-{target}/"
+                payload = output / f"psxtermd-{target}.elf"
+                with tarfile.open(archive) as bundle:
+                    metadata = json.load(bundle.extractfile(prefix + "BUILD_INFO.json"))
+                    self.assertEqual(bundle.extractfile(prefix + payload.name).read(), payload.read_bytes())
+                    self.assertEqual(bundle.getmember(prefix + payload.name).mode & 0o777, 0o755)
+                    for name in ("cli_test.elf", "exec_wrapper.elf", "hello.elf", "netprobe.elf"):
+                        self.assertIn(prefix + name, bundle.getnames())
+                    self.assertIn(prefix + f"psxterm-ttyprobe-{target}.elf", bundle.getnames())
+                    self.assertEqual(prefix + "pslist.elf" in bundle.getnames(), target == "ps5")
+                    self.assertNotIn(prefix + "psxterm-tui", bundle.getnames())
+                self.assertEqual(metadata["sdk"], sdk)
+                self.assertEqual(metadata["target"], target)
+                self.assertEqual(metadata["commit"], SHA)
+                checksums = (output / f"SHA256SUMS-{target}.txt").read_text().splitlines()
+                self.assertEqual(checksums, [f"{hashlib.sha256(asset.read_bytes()).hexdigest()}  {asset.name}"
+                                             for asset in (archive, payload)])
+
+    def test_invalid_console_elf_and_missing_required_tools_are_rejected(self):
+        wrong_arch = b"\x7fELF\x02\x01" + bytes(10) + (3).to_bytes(2, "little") + (183).to_bytes(2, "little") + bytes(44)
+        for invalid in (b"not an ELF", b"\x7fELF\x01\x01" + bytes(58),
+                        b"\x7fELF\x02\x01" + bytes(58), wrong_arch):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                sdk = self.console_fixture(root, "ps4")
+                (root / "build-nightly-ps4/psxtermd").write_bytes(invalid)
+                with patch("nightly.platform.system", return_value="Linux"), patch("nightly.platform.machine", return_value="x86_64"):
+                    with self.assertRaises(ValueError):
+                        nightly.package(root, root / "dist", "ps4", TAG, SHA, sdk)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sdk = self.console_fixture(root, "ps5")
+            (root / "build-nightly-ps5/exec_wrapper.elf").unlink()
+            with patch("nightly.platform.system", return_value="Linux"), patch("nightly.platform.machine", return_value="x86_64"):
+                with self.assertRaises(FileNotFoundError):
+                    nightly.package(root, root / "dist", "ps5", TAG, SHA, sdk)
+
+    def test_console_sdk_provenance_is_required(self):
+        for sdk in (None, {}, {"repository": "ps5-payload-dev/sdk", "version": "v1", "sha256": "a" * 64},
+                    {"repository": "ps4-payload-dev/sdk", "version": "v1", "sha256": "invalid"}):
+            with self.subTest(sdk=sdk), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                with patch("nightly.platform.system", return_value="Linux"), patch("nightly.platform.machine", return_value="x86_64"):
+                    with self.assertRaises(ValueError):
+                        nightly.package(root, root / "dist", "ps4", TAG, SHA, sdk)
+                self.assertFalse((root / "dist").exists())
+
     def test_archives_include_correct_binaries_provenance_and_checksums(self):
         for system, machine, target, binary in [
             ("Linux", "x86_64", "linux-x86_64", "psxterm-tui"),
