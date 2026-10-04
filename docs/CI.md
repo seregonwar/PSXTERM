@@ -83,7 +83,9 @@ commit provenance, checksums, and malformed translation resources.
 The terminal test helpers cover asynchronous completion across quiet redraw
 intervals, missing results, dialog dismissal, idle drains, and early client exit.
 Host CTest suites have a 60-second limit per test. The maximum-frame check uses
-a small socket send buffer and drains while writing, including on macOS.
+a small socket send buffer and drains while writing, including on macOS. Shell
+output tests use the same approach for long output and never block the writer
+before reading. Spawn diagnostics use `/bin/sh` on both supported host systems.
 
 Workflow files take effect after they are committed and pushed to the repository.
 Adding them locally does not run Actions or publish a nightly.

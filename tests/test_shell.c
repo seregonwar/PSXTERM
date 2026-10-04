@@ -25,7 +25,12 @@ fixture_open(fixture_t *fx)
     int fds[2];
 
     PSX_CHECK_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    PSX_CHECK_EQ(psx_set_nonblocking(fds[0], true), 0);
     PSX_CHECK_EQ(psx_set_nonblocking(fds[1], true), 0);
+    /* Exercise partial sends on every host, including Darwin's small buffers. */
+    int send_buffer = 1024;
+    PSX_CHECK_EQ(setsockopt(fds[0], SOL_SOCKET, SO_SNDBUF, &send_buffer,
+                           sizeof(send_buffer)), 0);
 
     fx->session = psx_session_create(1, fds[0]);
     fx->peer_fd = fds[1];
@@ -46,7 +51,8 @@ fixture_close(fixture_t *fx)
     close(fx->peer_fd);
 }
 
-/* Collect all currently available STDOUT/STDERR payloads. */
+/* Drain the session queue and collect STDOUT/STDERR payloads together. A
+ * blocking flush before reading can deadlock when output exceeds SO_SNDBUF. */
 static size_t
 collect(fixture_t *fx, char *out, size_t cap)
 {
@@ -54,12 +60,17 @@ collect(fixture_t *fx, char *out, size_t cap)
 
     out[0] = '\0';
 
-    for(;;) {
+    for(int pass = 0; pass < 4096; pass++) {
         ptty_header_t header;
         const uint8_t *payload = NULL;
+        PSX_CHECK_EQ(psx_session_flush(fx->session), 0);
         ptty_read_result_t rc = ptty_read_frame(&fx->reader, &header, &payload);
 
         if(rc != PTTY_READ_OK) {
+            PSX_CHECK_EQ(rc, PTTY_READ_AGAIN);
+            if(psx_buf_pending(&fx->session->out) > 0) {
+                continue;
+            }
             break;
         }
 
@@ -77,6 +88,7 @@ collect(fixture_t *fx, char *out, size_t cap)
         }
     }
 
+    PSX_CHECK_EQ(psx_buf_pending(&fx->session->out), 0);
     return used;
 }
 

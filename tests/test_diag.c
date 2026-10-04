@@ -201,7 +201,7 @@ test_spawn_failure_reporting(void)
     PSX_CHECK(strlen(failure.detail) > 0);
 
     memset(&options, 0, sizeof(options));
-    options.path = "/bin/true";
+    options.path = "/bin/sh";
     PSX_CHECK_EQ(psx_spawn_ex(&options, &failure), -1);
     PSX_CHECK_EQ(failure.error_code, EINVAL);
 
@@ -228,12 +228,13 @@ test_spawn_failure_reporting(void)
     }
 
     {
-        char *const true_argv[] = {"true", NULL};
+        /* macOS has no /bin/true; /bin/sh exists on both supported hosts. */
+        char *const success_argv[] = {"sh", "-c", "exit 0", NULL};
         pid_t pid;
         int status = 0;
 
-        options.path = "/bin/true";
-        options.argv = true_argv;
+        options.path = "/bin/sh";
+        options.argv = success_argv;
 
         pid = psx_spawn_ex(&options, &failure);
         PSX_CHECK(pid > 0);
