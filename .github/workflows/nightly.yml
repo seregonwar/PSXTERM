@@ -90,6 +90,7 @@ jobs:
         run: |
           python tests/integration/test_e2e.py --build build-nightly-host
           cargo build --release --locked --manifest-path client/tui/Cargo.toml --example tty_decode
+          python -m unittest discover -s client/tui/tests -p test_tty_smoke.py
           python client/tui/tests/tty_smoke.py --output build-nightly-tty
       - name: Package binaries and provenance
         env:

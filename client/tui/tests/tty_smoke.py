@@ -17,6 +17,50 @@ import time
 SIZES = [(55, 18), (60, 20), (72, 20), (80, 24), (100, 30), (120, 35), (140, 44), (200, 60)]
 
 
+def wait_for_redraw(master, process, transcript, decode, stage, expected=None,
+                    absent=None, required=True, timeout=2):
+    """Wait for the requested screen state, including asynchronous redraws."""
+    received = bytearray()
+    screen = ""
+    checking_screen = expected is not None or absent is not None
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([master], [], [], 0.15)
+            if not readable:
+                # A quiet interval ends a drain, but an export worker may still
+                # be running. Screen assertions must wait for their condition.
+                if not checking_screen and (received or not required):
+                    break
+                if process.poll() is not None:
+                    raise AssertionError(f"client exited during {stage}: {process.returncode}")
+                continue
+            try:
+                data = os.read(master, 65536)
+            except OSError as error:
+                if error.errno != errno.EIO:
+                    raise
+                break
+            if not data:
+                break
+            received.extend(data)
+            if checking_screen:
+                screen = decode(transcript + received)
+                # Wrapped dialog text has vertical borders between its lines.
+                plain = " ".join(" ".join(line.strip(" │") for line in screen.splitlines()).split())
+                matches = expected is None or " ".join(expected.split()) in plain
+                disappeared = absent is None or " ".join(absent.split()) not in plain
+                if matches and disappeared:
+                    return
+        if required and not received:
+            raise AssertionError(f"no terminal redraw during {stage}")
+        if checking_screen:
+            raise AssertionError(f"incorrect screen during {stage}: {screen!r}")
+    finally:
+        # Retain partial output in the failure transcript as well.
+        transcript.extend(received)
+
+
 def run_case(executable, decoder, cols, rows, language, output):
     import fcntl
     import pty
@@ -41,44 +85,15 @@ def run_case(executable, decoder, cols, rows, language, output):
         os.setsid()
         fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
+    def decode(data):
+        return subprocess.run(
+            [str(decoder), *map(str, viewport)], input=data,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=2,
+        ).stdout.decode("utf-8")
+
     def redraw(stage, expected=None, absent=None, required=True):
-        received = bytearray()
-        deadline = time.monotonic() + 2
-        while time.monotonic() < deadline:
-            readable, _, _ = select.select([master], [], [], 0.15)
-            if not readable:
-                if received or not required:
-                    break
-                if process.poll() is not None:
-                    raise AssertionError(f"client exited during {stage}: {process.returncode}")
-                continue
-            try:
-                data = os.read(master, 65536)
-            except OSError as error:
-                if error.errno != errno.EIO:
-                    raise
-                break
-            if not data:
-                break
-            received.extend(data)
-            if expected is not None or absent is not None:
-                screen = subprocess.run(
-                    [str(decoder), *map(str, viewport)], input=transcript + received,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=2,
-                ).stdout.decode("utf-8")
-                # Wrapped lines in a dialog have vertical borders between
-                # their text; omit those edges when matching the whole message.
-                plain = " ".join(" ".join(line.strip(" │") for line in screen.splitlines()).split())
-                matches = expected is None or " ".join(expected.split()) in plain
-                disappeared = absent is None or " ".join(absent.split()) not in plain
-                if matches and disappeared:
-                    transcript.extend(received)
-                    return
-        transcript.extend(received)
-        if required and not received:
-            raise AssertionError(f"no terminal redraw during {stage}")
-        if expected is not None or absent is not None:
-            raise AssertionError(f"incorrect screen during {stage}: {screen!r}")
+        wait_for_redraw(master, process, transcript, decode, stage,
+                        expected=expected, absent=absent, required=required)
 
     def key(sequence, stage, expected=None, absent=None):
         os.write(master, sequence)

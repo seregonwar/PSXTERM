@@ -40,6 +40,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cargo build --release --locked --manifest-path client/tui/Cargo.toml --example tty_decode
+          python3 -m unittest discover -s client/tui/tests -p test_tty_smoke.py
           python3 client/tui/tests/tty_smoke.py --output build-tui-tty-smoke
       - name: Real host daemon interoperability
         if: runner.os == 'Linux'

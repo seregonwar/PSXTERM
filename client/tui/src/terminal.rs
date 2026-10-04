@@ -160,20 +160,24 @@ impl Pane {
     }
     pub fn poll(&mut self, active: bool) -> bool {
         self.poll_with_budget(active, true, &mut crate::work::Budget::new())
+            .0
     }
     pub(crate) fn poll_with_budget(
         &mut self,
         active: bool,
         visible: bool,
         budget: &mut crate::work::Budget,
-    ) -> bool {
+    ) -> (bool, bool) {
         let mut changed = active && self.unread;
+        let mut pending = false;
+        let mut processed = 0;
         let mut ended = false;
         let mut bytes = 0;
         // A busy pane yields to the others as well as to input. Receive only
         // what can be processed now: unconsumed events stay in the bounded FIFO.
         for _ in 0..8 {
             if bytes >= crate::protocol::MAX_PAYLOAD || !budget.available() {
+                pending = self.connection.is_some();
                 break;
             }
             let Some(e) = self.connection.as_ref().and_then(|c| c.rx.try_recv().ok()) else {
@@ -184,6 +188,7 @@ impl Pane {
                 _ => 0,
             };
             bytes += size;
+            processed += 1;
             budget.record(size);
             changed |= !matches!(&e, Event::Output(_));
             match e {
@@ -249,7 +254,10 @@ impl Pane {
         if active {
             self.unread = false;
         }
-        changed
+        (
+            changed,
+            (pending || processed == 8) && self.connection.is_some(),
+        )
     }
     pub fn send(&mut self, command: Command) -> Result<()> {
         if !self.online {

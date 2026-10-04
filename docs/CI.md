@@ -72,12 +72,18 @@ API and does not push branches.
 ```console
 python3 tools/check_locales.py
 python3 -m unittest discover -s tests -p test_github_tools.py
+python3 -m unittest discover -s client/tui/tests -p test_tty_smoke.py
 actionlint -shellcheck= -pyflakes=
 ```
 
 Tests cover summer/winter schedules and transitions, duplicate scheduled builds,
 manual identities, OS/architecture mismatch, archive contents, executable modes,
 commit provenance, checksums, and malformed translation resources.
+
+The terminal test helpers cover asynchronous completion across quiet redraw
+intervals, missing results, dialog dismissal, idle drains, and early client exit.
+Host CTest suites have a 60-second limit per test. The maximum-frame check uses
+a small socket send buffer and drains while writing, including on macOS.
 
 Workflow files take effect after they are committed and pushed to the repository.
 Adding them locally does not run Actions or publish a nightly.

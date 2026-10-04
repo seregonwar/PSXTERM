@@ -368,6 +368,10 @@ test_reader_max_payload(void)
     const uint8_t *payload = NULL;
     uint8_t raw[PTTY_HEADER_SIZE];
     uint8_t *big;
+    psx_buf_t queued;
+    ptty_read_result_t result = PTTY_READ_AGAIN;
+    int send_buffer = 1024;
+    int partial_reads = 0;
     ptty_header_t wire = {
         .magic = PTTY_MAGIC,
         .version = PTTY_VERSION,
@@ -379,22 +383,43 @@ test_reader_max_payload(void)
 
     pair_open(&p);
     ptty_reader_init(&reader, p.rx);
+    psx_buf_init(&queued);
+    PSX_CHECK_EQ(psx_set_nonblocking(p.tx, true), 0);
+    PSX_CHECK_EQ(setsockopt(p.tx, SOL_SOCKET, SO_SNDBUF, &send_buffer,
+                           sizeof(send_buffer)), 0);
 
     big = malloc(PTTY_MAX_PAYLOAD);
     PSX_CHECK(big != NULL);
     if(big) {
         memset(big, 0x5a, PTTY_MAX_PAYLOAD);
         PSX_CHECK_EQ(ptty_header_encode(&wire, raw), 0);
-        PSX_CHECK_EQ(write(p.tx, raw, sizeof(raw)), (ssize_t)sizeof(raw));
-        PSX_CHECK_EQ(write(p.tx, big, PTTY_MAX_PAYLOAD), PTTY_MAX_PAYLOAD);
-        PSX_CHECK_EQ(ptty_read_frame(&reader, &header, &payload), PTTY_READ_OK);
-        PSX_CHECK(payload != NULL);
-        PSX_CHECK_EQ(payload[0], 0x5a);
-        PSX_CHECK_EQ(payload[PTTY_MAX_PAYLOAD - 1], 0x5a);
+        PSX_CHECK_EQ(psx_buf_append(&queued, raw, sizeof(raw)), 0);
+        PSX_CHECK_EQ(psx_buf_append(&queued, big, PTTY_MAX_PAYLOAD), 0);
+        /* Drain while sending: Darwin's socket buffer cannot hold a whole
+         * 64 KiB frame, so a blocking write before the first read deadlocks.
+         * A small send buffer exercises partial frames on Linux too. */
+        for(int pass = 0; pass < 4096 && result == PTTY_READ_AGAIN; pass++) {
+            PSX_CHECK(psx_buf_flush(&queued, p.tx) >= 0);
+            result = ptty_read_frame(&reader, &header, &payload);
+            if(result == PTTY_READ_AGAIN) {
+                partial_reads++;
+            }
+        }
+        PSX_CHECK_EQ(result, PTTY_READ_OK);
+        PSX_CHECK(partial_reads > 0);
+        PSX_CHECK_EQ(psx_buf_pending(&queued), 0);
+        if(result == PTTY_READ_OK) {
+            PSX_CHECK_EQ(header.payload_length, PTTY_MAX_PAYLOAD);
+            PSX_CHECK(payload != NULL);
+            if(payload) {
+                PSX_CHECK_EQ(memcmp(payload, big, PTTY_MAX_PAYLOAD), 0);
+            }
+        }
         free(big);
     }
 
     ptty_reader_destroy(&reader);
+    psx_buf_free(&queued);
     pair_close(&p);
 }
 
