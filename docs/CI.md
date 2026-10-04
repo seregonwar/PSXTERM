@@ -86,6 +86,8 @@ Host CTest suites have a 60-second limit per test. The maximum-frame check uses
 a small socket send buffer and drains while writing, including on macOS. Shell
 output tests use the same approach for long output and never block the writer
 before reading. Spawn diagnostics use `/bin/sh` on both supported host systems.
+Listing tests cover a working directory reached through a symbolic link and
+operands ending in `/`, `/.`, and `/..`, preserving filesystem path semantics.
 
 Workflow files take effect after they are committed and pushed to the repository.
 Adding them locally does not run Actions or publish a nightly.

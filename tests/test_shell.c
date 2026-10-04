@@ -105,6 +105,13 @@ run_line(fixture_t *fx, const char *line, char *out, size_t cap)
 }
 
 static void
+run_command(fixture_t *fx, const char *line, char *out, size_t cap)
+{
+    PSX_CHECK_EQ(psh_shell_execute_line(fx->shell, line), 0);
+    collect(fx, out, cap);
+}
+
+static void
 expect_contains(const char *haystack, const char *needle, const char *context)
 {
     PSX_CHECK_MSG(strstr(haystack, needle) != NULL,
@@ -522,6 +529,48 @@ test_session_table_output(void)
     fixture_close(&fx);
 }
 
+static void
+test_ls_symlink_directory(void)
+{
+    char root[] = "/tmp/psxterm-ls-link-XXXXXX";
+    char target[PSX_PATH_MAX], child[PSX_PATH_MAX], alias[PSX_PATH_MAX];
+    char out[8192];
+    fixture_t fx;
+    PSX_CHECK(mkdtemp(root) != NULL);
+    PSX_CHECK_EQ(psx_path_join(target, sizeof(target), root, "target"), 0);
+    PSX_CHECK_EQ(psx_path_join(child, sizeof(child), target, "child"), 0);
+    PSX_CHECK_EQ(psx_path_join(alias, sizeof(alias), root, "alias"), 0);
+    PSX_CHECK_EQ(mkdir(target, 0700), 0);
+    PSX_CHECK_EQ(mkdir(child, 0700), 0);
+    PSX_CHECK_EQ(symlink(child, alias), 0);
+    fixture_open(&fx);
+    snprintf(fx.session->cwd, sizeof(fx.session->cwd), "%s", alias);
+
+    run_command(&fx, "ls -ldn --color=never", out, sizeof(out));
+    PSX_CHECK_MSG(strncmp(out, "drwx", 4) == 0,
+                  "implicit . must list the current directory: %s", out);
+    expect_contains(out, " .\n", "implicit directory operand");
+    run_command(&fx, "ls -ldn --color=never .", out, sizeof(out));
+    PSX_CHECK(strncmp(out, "drwx", 4) == 0);
+
+    snprintf(fx.session->cwd, sizeof(fx.session->cwd), "%s", root);
+    run_command(&fx, "ls -ldn --color=never alias", out, sizeof(out));
+    PSX_CHECK(strncmp(out, "lrwx", 4) == 0);
+    expect_contains(out, "alias ->", "explicit symbolic link operand");
+    run_command(&fx, "ls -ldn --color=never alias/.", out, sizeof(out));
+    PSX_CHECK(strncmp(out, "drwx", 4) == 0);
+    expect_contains(out, " alias/.\n", "directory through symbolic link");
+    run_command(&fx, "ls -ldn --color=never alias/", out, sizeof(out));
+    PSX_CHECK(strncmp(out, "drwx", 4) == 0);
+    run_command(&fx, "ls -1 --color=never alias/..", out, sizeof(out));
+    PSX_CHECK_STR_EQ(out, "child\n");
+    fixture_close(&fx);
+    PSX_CHECK_EQ(unlink(alias), 0);
+    PSX_CHECK_EQ(rmdir(child), 0);
+    PSX_CHECK_EQ(rmdir(target), 0);
+    PSX_CHECK_EQ(rmdir(root), 0);
+}
+
 int
 main(void)
 {
@@ -534,6 +583,7 @@ main(void)
     test_printable_names();
     test_long_outputs_and_cwd();
     test_session_table_output();
+    test_ls_symlink_directory();
 
     return PSX_TEST_SUMMARY();
 }

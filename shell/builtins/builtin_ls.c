@@ -936,6 +936,31 @@ ls_parse_options(psx_session_t *session, int argc, char **argv,
     return operands;
 }
 
+/* Let the filesystem resolve components: removing . or .. lexically changes
+ * their meaning after a symbolic link, and a trailing / requires a directory. */
+static int
+ls_operand_path(const psx_session_t *session, const char *operand, char *path,
+                size_t capacity)
+{
+    if(!operand || !*operand) {
+        errno = EINVAL;
+        return -1;
+    }
+    if(operand[0] == '/')
+        return psx_path_join(path, capacity, "", operand);
+    if(operand[0] == '~' && (operand[1] == '\0' || operand[1] == '/')) {
+        const char *home = psx_env_get(&session->env, "HOME");
+        if(!home || !*home) {
+            errno = ENOENT;
+            return -1;
+        }
+        return operand[1] == '\0'
+                   ? psx_path_join(path, capacity, "", home)
+                   : psx_path_join(path, capacity, home, operand + 2);
+    }
+    return psx_path_join(path, capacity, session->cwd, operand);
+}
+
 int
 psh_builtin_ls(psx_session_t *session, int argc, char **argv)
 {
@@ -979,7 +1004,7 @@ psh_builtin_ls(psx_session_t *session, int argc, char **argv)
             break;
         }
         count++;
-        if(psx_session_absolute_path(session, args[i], path, sizeof(path)) <
+        if(ls_operand_path(session, args[i], path, sizeof(path)) <
            0) {
             entry->display = psh_display_text(args[i], true, &entry->width);
             psh_err(session, "ls: cannot access %s: %s\n",
@@ -1029,8 +1054,8 @@ psh_builtin_ls(psx_session_t *session, int argc, char **argv)
         char path[PSX_PATH_MAX];
         struct ls_entry *entries = NULL;
         size_t used = 0;
-        if(psx_session_absolute_path(session, operands[i].name, path,
-                                     sizeof(path)) < 0) {
+        if(ls_operand_path(session, operands[i].name, path,
+                           sizeof(path)) < 0) {
             status = 1;
             continue;
         }
